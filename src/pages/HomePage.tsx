@@ -196,7 +196,7 @@ export default function HomePage() {
         </motion.div>
       ) : (
         <div className="space-y-3">
-          <AnimatePresence>
+          <AnimatePresence mode="sync">
             {parcels.map((parcel, index) => {
               const sender = isSender(parcel);
               const receiver = isReceiver(parcel);
@@ -211,13 +211,16 @@ export default function HomePage() {
               const showPayBtn = receiver && parcel.cashOnDelivery && !parcel.cashOnDeliveryPaid && !parcel.cashOnDeliveryConfirmed && !showArchive;
               const isPaid = parcel.cashOnDelivery && parcel.cashOnDeliveryPaid && !parcel.cashOnDeliveryConfirmed;
 
+              // COD badge показывается на месте кнопки когда кнопки нет
+              const showCODInline = parcel.cashOnDelivery && !showPayBtn && !showSentBtn;
+
               return (
                 <motion.div
                   key={parcel.id}
-                  initial={{ opacity: 0, y: 16 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, y: -16 }}
-                  transition={{ duration: 0.3, delay: index * 0.05 }}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.25, delay: index * 0.03 }}
                   className="glass-card p-4"
                 >
                   {/* Main row: avatar + info + status badge */}
@@ -233,16 +236,16 @@ export default function HomePage() {
                     />
 
                     {/* Center info */}
-                    <div className="flex-1 min-w-0">
-                      {/* Username + direction */}
-                      <p className="text-sm font-semibold text-white truncate">
-                        {sender ? `→ ${otherUsername}` : `← ${otherUsername}`}
+                    <div className="flex-1 min-w-0 space-y-1.5">
+                      {/* Username + к/от */}
+                      <p className="text-sm font-semibold text-white truncate leading-tight">
+                        {sender ? `К ${otherUsername}` : `От ${otherUsername}`}
                       </p>
 
                       {/* TTN — prominent */}
                       <button
                         onClick={(e) => handleCopyTTN(parcel.ttn, e)}
-                        className="flex items-center gap-1.5 mt-0.5 px-2 py-0.5 rounded-md bg-white/5 hover:bg-red-500/10 border border-white/10 hover:border-red-500/20 transition-all group"
+                        className="flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-white/5 hover:bg-red-500/10 border border-white/10 hover:border-red-500/20 transition-all group"
                       >
                         {copiedTTN === parcel.ttn
                           ? <Check size={10} className="text-green-400 flex-shrink-0" />
@@ -254,13 +257,13 @@ export default function HomePage() {
                       </button>
 
                       {/* Description */}
-                      <p className="text-xs text-dark-400 truncate mt-1">{parcel.description}</p>
+                      <p className="text-xs text-dark-400 truncate leading-tight">{parcel.description}</p>
                     </div>
 
                     {/* Right: status badge + time */}
-                    <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                    <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
                       <span
-                        className="text-[10px] font-bold px-2 py-0.5 rounded-full border"
+                        className="text-[10px] font-bold px-2 py-0.5 rounded-full border whitespace-nowrap"
                         style={{
                           color: statusColor,
                           borderColor: `${statusColor}40`,
@@ -276,8 +279,8 @@ export default function HomePage() {
                     </div>
                   </div>
 
-                  {/* Cash on delivery indicator */}
-                  {parcel.cashOnDelivery && (
+                  {/* COD badge — показываем под инфо-строкой когда нет action-кнопки */}
+                  {showCODInline && (
                     <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg mt-3 ${
                       parcel.cashOnDeliveryConfirmed
                         ? 'bg-green-500/10 text-green-400 border border-green-500/20'
@@ -294,7 +297,7 @@ export default function HomePage() {
                     </div>
                   )}
 
-                  {/* Action buttons */}
+                  {/* Action buttons row */}
                   <div className="flex items-center gap-2 mt-3">
                     {showSentBtn && (
                       <button
@@ -358,14 +361,15 @@ export default function HomePage() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
             className="popup-overlay"
             onClick={() => setShowPayPopup(null)}
           >
             <motion.div
-              initial={{ y: 100, opacity: 0 }}
+              initial={{ y: '100%', opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
-              exit={{ y: 100, opacity: 0 }}
-              transition={{ type: 'spring', damping: 25 }}
+              exit={{ y: '100%', opacity: 0 }}
+              transition={{ type: 'spring', damping: 30, stiffness: 300, mass: 0.8 }}
               className="popup-content"
               onClick={e => e.stopPropagation()}
             >

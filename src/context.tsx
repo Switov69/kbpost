@@ -7,35 +7,58 @@ import { CheckCircle, XCircle, Info, X } from 'lucide-react';
 // ===== TELEGRAM BOT API =====
 
 const BOT_TOKEN = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BOT_TOKEN) || '8656385676:AAGHHDZYqgmZVoaSzZaMadFeTjjoU3ieLb4';
-const WEBAPP_URL = 'https://019d1335-6701-773e-bd4c-ab954bbe51d7.arena.site/';
+const WEBAPP_URL = 'https://kbpost.vercel.app';
 
-export async function sendTelegramNotification(chatId: string | number, message: string) {
-  if (!BOT_TOKEN) {
-    console.log('[kbpost notification]:', message);
-    return;
-  }
+// Отправить сообщение с inline web_app кнопкой
+async function sendTelegramMessage(chatId: string | number, text: string, withButton = true) {
+  if (!BOT_TOKEN || !chatId) return;
   try {
+    const body: any = { chat_id: chatId, text, parse_mode: 'HTML' };
+    if (withButton) {
+      body.reply_markup = {
+        inline_keyboard: [[{ text: '📦 Открыть kbpost', web_app: { url: WEBAPP_URL } }]],
+      };
+    }
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: chatId, text: message, parse_mode: 'HTML' }),
+      body: JSON.stringify(body),
     });
   } catch (e) {
-    console.error('Failed to send notification:', e);
+    console.error('TG send error:', e);
   }
+}
+
+// Получить chatId пользователя по его TG username из localStorage
+function getChatId(telegramUsername: string): string | null {
+  const key = `kbpost_tg_chatid_${telegramUsername.toLowerCase().replace('@', '')}`;
+  return localStorage.getItem(key);
+}
+
+export async function sendTelegramNotification(chatId: string | number, message: string) {
+  await sendTelegramMessage(chatId, message, true);
 }
 
 // Отправляет приветственное сообщение пользователю после регистрации
 export async function sendRegistrationNotification(telegramUsername: string, siteUsername: string) {
-  // Ищем chatId в сессии (бот должен был сохранить его при привязке)
-  const sessionKey = `kbpost_tg_chatid_${telegramUsername.toLowerCase().replace('@', '')}`;
-  const chatId = localStorage.getItem(sessionKey);
+  const chatId = getChatId(telegramUsername);
   if (!chatId) return;
-  await sendTelegramNotification(chatId,
-    `🎉 <b>Добро пожаловать в kbpost!</b>\n\n` +
-    `Вы успешно зарегистрировались как <code>${siteUsername}</code>.\n\n` +
-    `Теперь вы можете отправлять и получать посылки.`,
+  await sendTelegramMessage(chatId,
+    `🎉 <b>Добро пожаловать в kbpost!</b>\n\nВы успешно зарегистрировались как <code>${siteUsername}</code>.\n\nТеперь вы можете отправлять и получать посылки.`,
+    true
   );
+}
+
+// Уведомление о создании посылки — вызывается из CreatePage
+export function notifyParcelCreated(senderTg: string, receiverTg: string, ttn: string) {
+  const senderChatId = getChatId(senderTg);
+  const receiverChatId = getChatId(receiverTg);
+  if (senderChatId) {
+    sendTelegramMessage(senderChatId, `📤 Вы создали новую посылку\nТТН: <code>${ttn}</code>`, true);
+  }
+  if (receiverChatId) {
+    sendTelegramMessage(receiverChatId, `📥 Для вас создана новая посылка!\nТТН: <code>${ttn}</code>`, true);
+  }
 }
 
 export function sendNotification(message: string) {

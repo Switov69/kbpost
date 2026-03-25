@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useAuth, useToast, sendNotification } from '../context';
+import { useAuth, useToast, notifyParcelCreated } from '../context';
 import { createParcel, getBranches } from '../db';
 import { Branch, getBranchDisplay } from '../types';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -111,7 +111,12 @@ export default function CreatePage() {
       cashOnDeliveryAmount: cashOnDelivery ? Number(cashOnDeliveryAmount) : 0,
     });
 
-    sendNotification(`Новая посылка ${parcel.ttn} от ${user.username} для ${receiver.username}`);
+    // Уведомляем обоих пользователей через Telegram бота
+    notifyParcelCreated(
+      user.telegramUsername,
+      receiver.telegramUsername,
+      parcel.ttn
+    );
     addToast(`Посылка создана! ТТН: ${parcel.ttn} 📦`, 'success');
     navigate('/');
   };

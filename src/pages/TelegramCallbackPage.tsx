@@ -5,9 +5,9 @@ import { motion } from 'framer-motion';
 import { CheckCircle, XCircle, Loader } from 'lucide-react';
 
 /**
- * Обрабатывает callback-ссылки от Telegram бота:
+ * Обрабатывает callback-ссылки от Telegram бота (открывается как mini-app):
  * - #/tg-callback?action=reset&user=USERNAME&pwd=NEWPWD  — сброс пароля
- * - #/tg-callback?action=link&user=USERNAME&tg=@TGUSERNAME&token=TOKEN — привязка Telegram
+ * - #/tg-callback?action=link&user=USERNAME&tg=@TGUSERNAME&token=TOKEN&cid=CHATID — привязка
  */
 export default function TelegramCallbackPage() {
   const navigate = useNavigate();
@@ -44,9 +44,9 @@ export default function TelegramCallbackPage() {
 
       updateUser(targetUser.id, { password: newPwd });
       setStatus('success');
-      setMessage(`Пароль для аккаунта "${siteUsername}" успешно изменён! Теперь вы можете войти.`);
+      setMessage(`Пароль для "${siteUsername}" успешно изменён! Теперь вы можете войти.`);
 
-      setTimeout(() => navigate('/auth', { replace: true }), 2500);
+      setTimeout(() => navigate('/auth', { replace: true }), 2000);
       return;
     }
 
@@ -62,18 +62,21 @@ export default function TelegramCallbackPage() {
         return;
       }
 
-      // Сохраняем результат привязки и chatId для уведомлений
+      // Сохраняем результат привязки — AuthPage прочитает при открытии
       const linkData = { tgUsername, token, siteUsername, ts: Date.now() };
       localStorage.setItem('kbpost_tg_link_result', JSON.stringify(linkData));
+
+      // Сохраняем chatId для уведомлений
       if (chatId) {
         const tgKey = `kbpost_tg_chatid_${tgUsername.toLowerCase().replace('@', '')}`;
         localStorage.setItem(tgKey, chatId);
       }
 
       setStatus('success');
-      setMessage(`Telegram ${tgUsername} привязан к аккаунту "${siteUsername}"! Возвращаемся к регистрации...`);
+      setMessage(`Telegram ${tgUsername} привязан! Возвращаемся к регистрации...`);
 
-      setTimeout(() => navigate('/auth', { replace: true }), 2000);
+      // Навигируем на /auth с флагом что нужно открыть register
+      setTimeout(() => navigate('/auth?mode=register', { replace: true }), 1500);
       return;
     }
 

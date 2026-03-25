@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth, useToast, sendRegistrationNotification } from '../context';
+import { useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Eye, EyeOff, LogIn, UserPlus, CheckCircle, RefreshCw } from 'lucide-react';
+import { Eye, EyeOff, LogIn, UserPlus, CheckCircle } from 'lucide-react';
 
 const BOT_USERNAME = 'kbpostbot';
 
@@ -12,7 +13,11 @@ const TelegramIcon = ({ size = 18 }: { size?: number }) => (
 );
 
 export default function AuthPage() {
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const location = useLocation();
+  // Если пришли с ?mode=register (после привязки TG), сразу открываем регистрацию
+  const initialMode = new URLSearchParams(location.search).get('mode') === 'register' ? 'register' : 'login';
+
+  const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   const { login, register } = useAuth();
   const { addToast } = useToast();
 
@@ -21,7 +26,6 @@ export default function AuthPage() {
   const [showLoginPass, setShowLoginPass] = useState(false);
 
   const [regUsername, setRegUsername] = useState('');
-  // regTelegram — хранит @username привязанного аккаунта
   const [regTelegram, setRegTelegram] = useState('');
   const [regTelegramLinked, setRegTelegramLinked] = useState(false);
   const [regPassword, setRegPassword] = useState('');
@@ -29,36 +33,35 @@ export default function AuthPage() {
   const [regAccount, setRegAccount] = useState('');
   const [showRegPass, setShowRegPass] = useState(false);
 
-  // Проверяем localStorage на наличие результата привязки
-  const checkLinkResult = useCallback(() => {
+  // Читаем результат привязки из localStorage (записывается TelegramCallbackPage)
+  const applyLinkResult = useCallback(() => {
     const raw = localStorage.getItem('kbpost_tg_link_result');
-    if (!raw) return;
+    if (!raw) return false;
     try {
       const data = JSON.parse(raw) as { tgUsername: string; token: string; siteUsername: string; ts: number };
-      // Данные актуальны 10 минут
-      if (Date.now() - data.ts > 10 * 60 * 1000) {
+      // Данные актуальны 15 минут
+      if (Date.now() - data.ts > 15 * 60 * 1000) {
         localStorage.removeItem('kbpost_tg_link_result');
-        return;
+        return false;
       }
-      // Применяем привязку если никнейм совпадает или поле пустое
-      if (!regUsername || data.siteUsername.toLowerCase() === regUsername.trim().toLowerCase()) {
-        setRegTelegram(data.tgUsername);
-        setRegTelegramLinked(true);
-        if (!regUsername) setRegUsername(data.siteUsername);
-        localStorage.removeItem('kbpost_tg_link_result');
-        addToast(`Telegram ${data.tgUsername} привязан!`, 'success');
-      }
+      // Применяем
+      setRegTelegram(data.tgUsername);
+      setRegTelegramLinked(true);
+      if (data.siteUsername && !regUsername) setRegUsername(data.siteUsername);
+      setMode('register');
+      localStorage.removeItem('kbpost_tg_link_result');
+      addToast(`Telegram ${data.tgUsername} привязан! ✅`, 'success');
+      return true;
     } catch {
       localStorage.removeItem('kbpost_tg_link_result');
+      return false;
     }
   }, [regUsername, addToast]);
 
-  // Проверяем при загрузке и при возврате фокуса (пользователь вернулся из Telegram)
+  // Применяем при монтировании — если вернулись из mini-app после привязки
   useEffect(() => {
-    checkLinkResult();
-    window.addEventListener('focus', checkLinkResult);
-    return () => window.removeEventListener('focus', checkLinkResult);
-  }, [checkLinkResult]);
+    applyLinkResult();
+  }, []);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -73,7 +76,6 @@ export default function AuthPage() {
     }
   };
 
-  // Открывает бота с deep link командой для сброса пароля
   const handleResetPassword = () => {
     const username = loginUsername.trim();
     if (!username) {
@@ -87,7 +89,6 @@ export default function AuthPage() {
     );
   };
 
-  // Открывает бота с deep link командой для привязки Telegram
   const handleLinkTelegram = () => {
     const username = regUsername.trim();
     if (!username) {
@@ -96,12 +97,13 @@ export default function AuthPage() {
     }
     const token = Math.random().toString(36).substring(2, 10);
     sessionStorage.setItem(`kbpost_link_token_${username.toLowerCase()}`, token);
+    // Открывает бота — бот пришлёт web_app кнопку, которая откроет mini-app с параметрами
     window.open(
       `https://t.me/${BOT_USERNAME}?start=link_${encodeURIComponent(username)}_${token}`,
       '_blank',
       'noopener,noreferrer'
     );
-    addToast('Откройте бота и нажмите "Подтвердить привязку"', 'info');
+    addToast('Перейдите в бота и нажмите "Подтвердить привязку"', 'info');
   };
 
   const handleRegister = async (e: React.FormEvent) => {
@@ -119,17 +121,11 @@ export default function AuthPage() {
     });
     if (result.success) {
       addToast('Регистрация успешна! 🎉', 'success');
-      // Отправляем уведомление пользователю в Telegram
       sendRegistrationNotification(regTelegram, regUsername).catch(() => {});
     } else {
       addToast(result.error || 'Ошибка регистрации', 'error');
     }
   };
-
-  // Аватарка Telegram через unavatar.io (публичная CDN для tg аватаров)
-  const tgAvatarUrl = regTelegram
-    ? `https://unavatar.io/telegram/${regTelegram.replace('@', '')}`
-    : '';
 
   return (
     <div className="min-h-screen min-h-[100dvh] flex flex-col items-center justify-center px-4 relative">
@@ -260,7 +256,6 @@ export default function AuthPage() {
                   value={regUsername}
                   onChange={e => {
                     setRegUsername(e.target.value);
-                    // Сбрасываем привязку если никнейм изменился
                     if (regTelegramLinked) {
                       setRegTelegramLinked(false);
                       setRegTelegram('');
@@ -273,22 +268,17 @@ export default function AuthPage() {
               <div>
                 <label className="block text-sm font-medium text-dark-300 mb-2">Telegram</label>
                 {regTelegramLinked && regTelegram ? (
-                  /* Привязан — показываем аватарку и username */
+                  /* Привязан — показываем username с иконкой */
                   <div className="flex items-center gap-3 p-3 rounded-xl bg-green-500/10 border border-green-500/20">
-                    <img
-                      src={tgAvatarUrl}
-                      alt={regTelegram}
-                      className="w-9 h-9 rounded-xl object-cover flex-shrink-0"
-                      onError={(e) => {
-                        (e.target as HTMLImageElement).style.display = 'none';
-                      }}
-                    />
+                    <div className="w-9 h-9 rounded-xl bg-[#229ED9]/20 flex items-center justify-center flex-shrink-0">
+                      <TelegramIcon size={18} />
+                    </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
                         <CheckCircle size={13} className="text-green-400 flex-shrink-0" />
                         <span className="text-sm text-green-400 font-semibold truncate">{regTelegram}</span>
                       </div>
-                      <p className="text-[10px] text-dark-400">Telegram привязан</p>
+                      <p className="text-[10px] text-dark-400 mt-0.5">Telegram привязан</p>
                     </div>
                     <button
                       type="button"
@@ -299,8 +289,7 @@ export default function AuthPage() {
                     </button>
                   </div>
                 ) : (
-                  /* Не привязан — кнопка + кнопка проверки */
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     <button
                       type="button"
                       onClick={handleLinkTelegram}
@@ -309,16 +298,8 @@ export default function AuthPage() {
                       <TelegramIcon size={18} />
                       Привязать Telegram
                     </button>
-                    <button
-                      type="button"
-                      onClick={checkLinkResult}
-                      className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl bg-white/5 border border-white/5 text-dark-400 text-xs font-medium hover:text-white hover:bg-white/8 transition-all duration-200"
-                    >
-                      <RefreshCw size={12} />
-                      Я подтвердил в боте — проверить
-                    </button>
                     <p className="text-xs text-dark-500 text-center">
-                      Нажмите первую кнопку → подтвердите в боте → нажмите проверить
+                      Откроется бот → нажмите «Подтвердить привязку» → kbpost откроется автоматически
                     </p>
                   </div>
                 )}
