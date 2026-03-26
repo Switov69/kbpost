@@ -46,25 +46,35 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // 4. РАБОТА С ТОКЕНАМИ БОТА (create-token, check-token, confirm)
+    // 4. РАБОТА С ТОКЕНАМИ БОТА (ИСПРАВЛЕНО: Добавлена вставка токена)
     if (action === 'createToken') {
       const secret = req.headers['x-bot-secret'];
       if (secret !== process.env.BOT_SECRET) return res.status(403).json({ error: 'Forbidden' });
-      const { actionType, data } = req.body;
-      const rows = await sql`INSERT INTO pending_actions (action_type, data) VALUES (${actionType}, ${data}) RETURNING token`;
-      return res.status(200).json({ token: rows[0].token });
+      
+      const { token, actionType, data } = req.body; // Получаем сгенерированный ботом токен
+      
+      if (!token) return res.status(400).json({ error: 'Token is required' });
+
+      // Прямо указываем колонку token в INSERT, чтобы избежать ошибки NULL
+      await sql`
+        INSERT INTO pending_actions (token, action_type, data) 
+        VALUES (${token}, ${actionType}, ${JSON.stringify(data)})
+      `;
+      
+      return res.status(200).json({ token });
     }
 
     if (action === 'checkToken') {
       const { token } = req.body;
-      const rows = await sql`SELECT * FROM pending_actions WHERE token = ${token}::uuid AND expires_at > NOW()`;
+      // Используем простой поиск, так как токены теперь — обычные строки (не всегда UUID)
+      const rows = await sql`SELECT * FROM pending_actions WHERE token = ${token} AND expires_at > NOW()`;
       if (!rows.length) return res.status(404).json({ error: 'Токен истек' });
       return res.status(200).json(rows[0]);
     }
 
     if (action === 'confirm' && req.method === 'POST') {
         const { token, password } = req.body;
-        const rows = await sql`SELECT * FROM pending_actions WHERE token = ${token}::uuid AND expires_at > NOW()`;
+        const rows = await sql`SELECT * FROM pending_actions WHERE token = ${token} AND expires_at > NOW()`;
         if (!rows.length) return res.status(404).json({ error: 'Токен не найден' });
         
         const { action_type, data } = rows[0];
@@ -74,7 +84,7 @@ module.exports = async function handler(req, res) {
             const hash = await bcrypt.hash(password, 10);
             await sql`UPDATE users SET password_hash = ${hash} WHERE LOWER(username) = LOWER(${data.siteUsername})`;
         }
-        await sql`DELETE FROM pending_actions WHERE token = ${token}::uuid`;
+        await sql`DELETE FROM pending_actions WHERE token = ${token}`;
         return res.status(200).json({ ok: true });
     }
 
