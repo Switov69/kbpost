@@ -12,7 +12,7 @@ module.exports = async function handler(req, res) {
   try {
     const { action } = req.body || req.query || {};
 
-    // 1. LOGIN (из login.js)
+    // 1. LOGIN
     if (action === 'login' && req.method === 'POST') {
       const { username, password } = req.body;
       const rows = await sql`SELECT * FROM users WHERE LOWER(username) = LOWER(${username}) LIMIT 1`;
@@ -20,13 +20,14 @@ module.exports = async function handler(req, res) {
         return res.status(401).json({ error: 'Неверный никнейм или пароль' });
       }
       const user = rows[0];
-      const sessionRows = await sql`INSERT INTO sessions (user_id) VALUES (${user.id}::uuid) RETURNING token`;
+      // Здесь оставляем UUID, так как в таблице sessions/users id - это UUID
+      const sessionRows = await sql`INSERT INTO sessions (user_id) VALUES (${user.id}) RETURNING token`;
       const token = sessionRows[0].token;
       res.setHeader('Set-Cookie', `kbpost_session=${token}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${30 * 24 * 3600}`);
       return res.status(200).json({ token, user: { id: user.id, username: user.username, isAdmin: user.is_admin } });
     }
 
-    // 2. REGISTER (из register.js)
+    // 2. REGISTER
     if (action === 'register' && req.method === 'POST') {
       const { username, password, telegramUsername, citizenship, account } = req.body;
       const passwordHash = await bcrypt.hash(password, 10);
@@ -38,44 +39,43 @@ module.exports = async function handler(req, res) {
       return res.status(201).json(newUser[0]);
     }
 
-    // 3. LOGOUT (из logout.js)
+    // 3. LOGOUT
     if (action === 'logout') {
       const session = await getSessionUser(req);
-      if (session) await sql`DELETE FROM sessions WHERE token = ${session.token}::uuid`;
+      if (session) await sql`DELETE FROM sessions WHERE token = ${session.token}`;
       res.setHeader('Set-Cookie', 'kbpost_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0');
       return res.status(200).json({ ok: true });
     }
 
-    // 4. РАБОТА С ТОКЕНАМИ БОТА (ИСПРАВЛЕНО: Добавлена вставка токена)
+    // 4. BOT: createToken
     if (action === 'createToken') {
       const secret = req.headers['x-bot-secret'];
       if (secret !== process.env.BOT_SECRET) return res.status(403).json({ error: 'Forbidden' });
       
-      const { token, actionType, data } = req.body; // Получаем сгенерированный ботом токен
-      
+      const { token, actionType, data } = req.body;
       if (!token) return res.status(400).json({ error: 'Token is required' });
 
-      // Прямо указываем колонку token в INSERT, чтобы избежать ошибки NULL
       await sql`
-        INSERT INTO pending_actions (token, action_type, data) 
-        VALUES (${token}, ${actionType}, ${JSON.stringify(data)})
+        INSERT INTO pending_actions (token, action_type, data, expires_at) 
+        VALUES (${token}, ${actionType}, ${JSON.stringify(data)}, NOW() + INTERVAL '1 hour')
       `;
-      
       return res.status(200).json({ token });
     }
 
+    // 5. BOT: checkToken
     if (action === 'checkToken') {
       const { token } = req.body;
-      // Используем простой поиск, так как токены теперь — обычные строки (не всегда UUID)
+      // Здесь убрано ::uuid, так как токен теперь TEXT
       const rows = await sql`SELECT * FROM pending_actions WHERE token = ${token} AND expires_at > NOW()`;
-      if (!rows.length) return res.status(404).json({ error: 'Токен истек' });
+      if (!rows.length) return res.status(404).json({ error: 'Токен истек или не найден' });
       return res.status(200).json(rows[0]);
     }
 
+    // 6. BOT: confirm
     if (action === 'confirm' && req.method === 'POST') {
         const { token, password } = req.body;
         const rows = await sql`SELECT * FROM pending_actions WHERE token = ${token} AND expires_at > NOW()`;
-        if (!rows.length) return res.status(404).json({ error: 'Токен не найден' });
+        if (!rows.length) return res.status(404).json({ error: 'Действие не найдено' });
         
         const { action_type, data } = rows[0];
         if (action_type === 'link_tg') {
@@ -88,9 +88,9 @@ module.exports = async function handler(req, res) {
         return res.status(200).json({ ok: true });
     }
 
-    return res.status(405).json({ error: 'Method or action not allowed' });
+    return res.status(405).json({ error: 'Method not allowed' });
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: 'Ошибка сервера' });
+    console.error('API Error:', err);
+    return res.status(500).json({ error: err.message });
   }
 };
