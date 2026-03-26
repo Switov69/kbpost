@@ -9,6 +9,8 @@ module.exports = async function handler(req, res) {
 
   const sql = getDB();
 
+  console.log("Current DB URL:", process.env.DATABASE_URL.split('@')[1]); // Выведет хост базы без пароля
+  
   try {
     const { action } = req.body || req.query || {};
 
