@@ -1,17 +1,17 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth, useToast, sendNotification } from '../context';
-import { getParcelById, updateParcelStatus, markParcelPaid, getBranchById } from '../db';
+import { apiGetParcels, apiUpdateParcel, apiGetBranches, type ParcelDTO, type BranchDTO } from '../api';
 import { STATUS_LABELS, STATUS_COLORS, getBranchDisplay } from '../types';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ArrowLeft, Package, Truck, MapPin, CreditCard,
-  CheckCircle, User, X, Copy, Check, Route
+  CheckCircle, User, X, Copy, Check, Route, Loader
 } from 'lucide-react';
 
-function getBranchInfo(id: string | null): string {
+function getBranchInfo(id: string | null, branches: BranchDTO[]): string {
   if (!id) return '—';
-  const branch = getBranchById(id);
+  const branch = branches.find(b => b.id === id);
   if (!branch) return id;
   const d = getBranchDisplay(branch);
   return `${d.line1}\n${d.line2}`;
@@ -22,15 +22,35 @@ export default function ParcelDetailPage() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { addToast } = useToast();
-  const [refreshKey, setRefreshKey] = useState(0);
+  const [parcel, setParcel] = useState<ParcelDTO | null>(null);
+  const [branches, setBranches] = useState<BranchDTO[]>([]);
+  const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState(false);
   const [showPayPopup, setShowPayPopup] = useState(false);
 
-  const parcel = useMemo(() => {
-    if (!id) return null;
-    return getParcelById(id);
-    // eslint-disable-next-line
-  }, [id, refreshKey]);
+  const fetchData = useCallback(async () => {
+    if (!id) return;
+    try {
+      const [parcels, branchList] = await Promise.all([apiGetParcels(), apiGetBranches()]);
+      const found = parcels.find(p => p.id === id);
+      setParcel(found || null);
+      setBranches(branchList);
+    } catch {
+      addToast('Не удалось загрузить данные', 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [id, addToast]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader size={32} className="text-red-400 animate-spin" />
+      </div>
+    );
+  }
 
   if (!parcel || !user) {
     return (
@@ -44,13 +64,13 @@ export default function ParcelDetailPage() {
     );
   }
 
-  const isSender = user.id === parcel.senderId;
+  const isSender   = user.id === parcel.senderId;
   const isReceiver = user.id === parcel.receiverId;
   const otherUsername = isSender ? parcel.receiverUsername : parcel.senderUsername;
 
-  const showSentBtn = isSender && parcel.status === 1;
+  const showSentBtn     = isSender   && parcel.status === 1;
   const showReceivedBtn = isReceiver && parcel.status === 6;
-  const showPayBtn = isReceiver && parcel.cashOnDelivery && !parcel.cashOnDeliveryPaid && !parcel.cashOnDeliveryConfirmed;
+  const showPayBtn      = isReceiver && parcel.cashOnDelivery && !parcel.cashOnDeliveryPaid && !parcel.cashOnDeliveryConfirmed;
 
   const handleCopyTTN = () => {
     navigator.clipboard.writeText(parcel.ttn).then(() => {
@@ -59,30 +79,42 @@ export default function ParcelDetailPage() {
     });
   };
 
-  const handleMarkSent = () => {
-    updateParcelStatus(parcel.id, 2);
-    sendNotification(`Посылка ${parcel.ttn} принята в отделении`);
-    addToast('Статус обновлён: Приняли в отделении ✅', 'success');
-    setRefreshKey(k => k + 1);
+  const handleMarkSent = async () => {
+    try {
+      const updated = await apiUpdateParcel(parcel.id, 'updateStatus', { newStatus: 2 });
+      setParcel(updated);
+      sendNotification(`Посылка ${parcel.ttn} принята в отделении`);
+      addToast('Статус обновлён: Приняли в отделении ✅', 'success');
+    } catch (err: any) {
+      addToast(err.message || 'Ошибка', 'error');
+    }
   };
 
-  const handleMarkReceived = () => {
+  const handleMarkReceived = async () => {
     if (parcel.cashOnDelivery && !parcel.cashOnDeliveryConfirmed) {
       addToast('Сначала оплатите наложенный платёж', 'error');
       return;
     }
-    updateParcelStatus(parcel.id, 7);
-    sendNotification(`Посылка ${parcel.ttn} получена`);
-    addToast('Посылка получена! 📦✅', 'success');
-    setRefreshKey(k => k + 1);
+    try {
+      const updated = await apiUpdateParcel(parcel.id, 'updateStatus', { newStatus: 7 });
+      setParcel(updated);
+      sendNotification(`Посылка ${parcel.ttn} получена`);
+      addToast('Посылка получена! 📦✅', 'success');
+    } catch (err: any) {
+      addToast(err.message || 'Ошибка', 'error');
+    }
   };
 
-  const handleConfirmPay = () => {
-    markParcelPaid(parcel.id);
-    sendNotification(`Оплата за посылку ${parcel.ttn} отправлена на проверку`);
-    addToast('Заявка на подтверждение оплаты отправлена! 💰', 'success');
-    setShowPayPopup(false);
-    setRefreshKey(k => k + 1);
+  const handleConfirmPay = async () => {
+    try {
+      const updated = await apiUpdateParcel(parcel.id, 'markPaid');
+      setParcel(updated);
+      sendNotification(`Оплата за посылку ${parcel.ttn} отправлена на проверку`);
+      addToast('Заявка на подтверждение оплаты отправлена! 💰', 'success');
+      setShowPayPopup(false);
+    } catch (err: any) {
+      addToast(err.message || 'Ошибка', 'error');
+    }
   };
 
   return (
@@ -105,10 +137,7 @@ export default function ParcelDetailPage() {
         {/* TTN */}
         <div className="flex items-center justify-between mb-4">
           <span className="font-mono font-bold text-lg">{parcel.ttn}</span>
-          <button
-            onClick={handleCopyTTN}
-            className="btn-secondary btn-small"
-          >
+          <button onClick={handleCopyTTN} className="btn-secondary btn-small">
             {copied ? <Check size={14} className="text-green-400" /> : <Copy size={14} />}
             {copied ? 'Скопировано' : 'Копировать'}
           </button>
@@ -125,18 +154,13 @@ export default function ParcelDetailPage() {
             }}
           />
           <div>
-            <p className="text-sm text-dark-400">
-              {isSender ? 'Получатель' : 'Отправитель'}
-            </p>
-            <p className="text-lg font-bold">{otherUsername}</p>
+            <p className="text-sm text-dark-400">{isSender ? 'Получатель' : 'Отправитель'}</p>
+            <p className="text-base font-bold">{otherUsername}</p>
           </div>
         </div>
 
         {/* Status */}
-        <div
-          className="flex items-center gap-2 p-3 rounded-xl"
-          style={{ backgroundColor: `${STATUS_COLORS[parcel.status]}10`, border: `1px solid ${STATUS_COLORS[parcel.status]}25` }}
-        >
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-white/5">
           <div
             className="w-2.5 h-2.5 rounded-full"
             style={{ backgroundColor: STATUS_COLORS[parcel.status], boxShadow: `0 0 8px ${STATUS_COLORS[parcel.status]}60` }}
@@ -169,7 +193,7 @@ export default function ParcelDetailPage() {
             <MapPin size={16} className="text-dark-400 mt-0.5 flex-shrink-0" />
             <div>
               <p className="text-xs text-dark-500">Откуда</p>
-              <p className="text-sm text-white whitespace-pre-line">{getBranchInfo(parcel.fromBranchId)}</p>
+              <p className="text-sm text-white whitespace-pre-line">{getBranchInfo(parcel.fromBranchId, branches)}</p>
             </div>
           </div>
 
@@ -179,7 +203,7 @@ export default function ParcelDetailPage() {
               <p className="text-xs text-dark-500">Куда</p>
               <p className="text-sm text-white whitespace-pre-line">
                 {parcel.toBranchId
-                  ? getBranchInfo(parcel.toBranchId)
+                  ? getBranchInfo(parcel.toBranchId, branches)
                   : `Координаты: ${parcel.toCoordinates}`}
               </p>
             </div>
@@ -221,6 +245,36 @@ export default function ParcelDetailPage() {
           )}
         </div>
       </motion.div>
+
+      {/* Status history */}
+      {parcel.statusHistory.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.15 }}
+          className="glass-card-static p-5 space-y-3"
+        >
+          <h3 className="text-sm font-bold text-dark-300 uppercase tracking-wider">История статусов</h3>
+          <div className="space-y-2">
+            {[...parcel.statusHistory].reverse().map((entry, i) => (
+              <div key={i} className="flex items-center gap-3">
+                <div
+                  className="w-2 h-2 rounded-full flex-shrink-0"
+                  style={{ backgroundColor: STATUS_COLORS[entry.status] || '#6b7280' }}
+                />
+                <div className="flex-1 flex items-center justify-between gap-2">
+                  <span className="text-sm" style={{ color: STATUS_COLORS[entry.status] || '#9ca3af' }}>
+                    {entry.label}
+                  </span>
+                  <span className="text-xs text-dark-500 flex-shrink-0">
+                    {new Date(entry.timestamp).toLocaleString('ru', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </motion.div>
+      )}
 
       {/* Route button */}
       <motion.div
@@ -296,7 +350,6 @@ export default function ParcelDetailPage() {
                   <X size={20} />
                 </button>
               </div>
-
               <div className="space-y-4">
                 <div className="glass-card-static p-4 space-y-3">
                   <div className="flex items-center justify-between">
@@ -312,7 +365,6 @@ export default function ParcelDetailPage() {
                     <span className="text-sm font-semibold text-red-400">kbpost</span>
                   </div>
                 </div>
-
                 <div className="glass-card-static p-4 space-y-2">
                   <h4 className="text-sm font-semibold">📋 Инструкция по оплате:</h4>
                   <ol className="text-sm text-dark-300 space-y-1.5 list-decimal list-inside">
@@ -322,7 +374,6 @@ export default function ParcelDetailPage() {
                     <li>После перевода нажмите кнопку <span className="text-green-400 font-medium">«Я оплатил»</span> ниже</li>
                   </ol>
                 </div>
-
                 <div className="flex gap-2">
                   <button onClick={() => setShowPayPopup(false)} className="btn-secondary flex-1">Отмена</button>
                   <button onClick={handleConfirmPay} className="btn-primary flex-1">

@@ -1,192 +1,151 @@
+/**
+ * db.ts — API-обёртки, совместимые с существующим кодом AdminPage, CreatePage и т.д.
+ * Все функции теперь работают через Vercel API, не через localStorage.
+ *
+ * Синхронные функции заменены на async там, где это нужно.
+ * Для обратной совместимости некоторые функции возвращают данные из локального кеша.
+ */
+
+import {
+  apiGetParcels, apiGetAllUsers, apiCreateParcel,
+  apiUpdateParcel, apiDeleteParcel,
+  apiGetBranches, apiManageBranch,
+  apiManageUser,
+  type ParcelDTO, type UserDTO, type BranchDTO,
+} from './api';
 import { User, Parcel, Branch, STATUS_LABELS } from './types';
 
-const USERS_KEY = 'kbpost_users';
-const PARCELS_KEY = 'kbpost_parcels';
-const BRANCHES_KEY = 'kbpost_branches';
+// ===== УТИЛИТЫ =====
 
-function generateId(): string {
-  return Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
+function userDtoToModel(dto: UserDTO): User {
+  return {
+    id:               dto.id,
+    username:         dto.username,
+    telegramUsername: dto.telegramId ? `@${dto.telegramId}` : '',
+    password:         '',
+    citizenship:      dto.citizenship,
+    account:          dto.account,
+    isAdmin:          dto.isAdmin,
+    createdAt:        dto.createdAt || new Date().toISOString(),
+  };
 }
 
-export function generateTTN(): string {
-  const parcels = getParcels();
-  const existingTTNs = new Set(parcels.map(p => p.ttn));
-  let ttn: string;
-  do {
-    const num = Math.floor(1 + Math.random() * 9999);
-    ttn = `#${num.toString().padStart(4, '0')}`;
-  } while (existingTTNs.has(ttn));
-  return ttn;
+function parcelDtoToModel(dto: ParcelDTO): Parcel {
+  return {
+    id:                       dto.id,
+    ttn:                      dto.ttn,
+    description:              dto.description,
+    senderId:                 dto.senderId,
+    receiverId:               dto.receiverId,
+    senderUsername:           dto.senderUsername,
+    receiverUsername:         dto.receiverUsername,
+    status:                   dto.status,
+    statusHistory:            dto.statusHistory,
+    fromBranchId:             dto.fromBranchId,
+    toBranchId:               dto.toBranchId,
+    toCoordinates:            dto.toCoordinates,
+    cashOnDelivery:           dto.cashOnDelivery,
+    cashOnDeliveryAmount:     dto.cashOnDeliveryAmount,
+    cashOnDeliveryPaid:       dto.cashOnDeliveryPaid,
+    cashOnDeliveryConfirmed:  dto.cashOnDeliveryConfirmed,
+    createdAt:                dto.createdAt,
+    updatedAt:                dto.updatedAt,
+  };
 }
 
-const DEFAULT_BRANCHES: Branch[] = [
-  {
-    id: 'br_stolica_1',
-    number: 1,
-    region: 'Столица',
-    prefecture: 'Holeland',
-    address: 'аскб авеню, 6',
-  },
-  {
-    id: 'br_antegriya_1',
-    number: 1,
-    region: 'Антегрия',
-    prefecture: 'Данюшатаун',
-    address: '',
-  },
-];
-
-export function initDB(): void {
-  if (!localStorage.getItem(USERS_KEY)) {
-    const adminUser: User = {
-      id: 'admin_001',
-      username: 'Markizow',
-      telegramUsername: '@markizow',
-      password: 'Ilya8961a',
-      citizenship: 'Столица',
-      account: 'Свит',
-      isAdmin: true,
-      createdAt: new Date().toISOString(),
-    };
-    localStorage.setItem(USERS_KEY, JSON.stringify([adminUser]));
-  } else {
-    const users = getUsers();
-    const admin = users.find(u => u.username === 'Markizow');
-    if (!admin) {
-      users.push({
-        id: 'admin_001',
-        username: 'Markizow',
-        telegramUsername: '@markizow',
-        password: 'Ilya8961a',
-        citizenship: 'Столица',
-        account: 'Свит',
-        isAdmin: true,
-        createdAt: new Date().toISOString(),
-      });
-      localStorage.setItem(USERS_KEY, JSON.stringify(users));
-    }
-  }
-  if (!localStorage.getItem(PARCELS_KEY)) {
-    localStorage.setItem(PARCELS_KEY, JSON.stringify([]));
-  }
-  if (!localStorage.getItem(BRANCHES_KEY)) {
-    localStorage.setItem(BRANCHES_KEY, JSON.stringify(DEFAULT_BRANCHES));
-  }
-}
+// ===== NO-OP initDB (больше не нужен, совместимость) =====
+export function initDB(): void {}
 
 // ===== BRANCHES =====
 
-export function getBranches(): Branch[] {
-  const data = localStorage.getItem(BRANCHES_KEY);
-  return data ? JSON.parse(data) : DEFAULT_BRANCHES;
+export async function getBranches(): Promise<Branch[]> {
+  const dtos = await apiGetBranches();
+  return dtos.map(b => ({ id: b.id, number: b.number, region: b.region, prefecture: b.prefecture, address: b.address }));
 }
 
-export function getBranchById(id: string): Branch | undefined {
-  return getBranches().find(b => b.id === id);
+export async function getBranchById(id: string): Promise<Branch | undefined> {
+  const branches = await getBranches();
+  return branches.find(b => b.id === id);
 }
 
-export function createBranch(data: Omit<Branch, 'id'>): Branch {
-  const branches = getBranches();
-  const newBranch: Branch = { ...data, id: generateId() };
-  branches.push(newBranch);
-  localStorage.setItem(BRANCHES_KEY, JSON.stringify(branches));
-  return newBranch;
+export async function createBranch(data: Omit<Branch, 'id'>): Promise<Branch> {
+  const result = await apiManageBranch('create', data) as BranchDTO;
+  return { id: result.id, number: result.number, region: result.region, prefecture: result.prefecture, address: result.address };
 }
 
-export function updateBranch(id: string, data: Partial<Branch>): Branch | undefined {
-  const branches = getBranches();
-  const index = branches.findIndex(b => b.id === id);
-  if (index === -1) return undefined;
-  branches[index] = { ...branches[index], ...data };
-  localStorage.setItem(BRANCHES_KEY, JSON.stringify(branches));
-  return branches[index];
+export async function updateBranch(id: string, data: Partial<Branch>): Promise<Branch> {
+  const result = await apiManageBranch('update', { id, ...data }) as BranchDTO;
+  return { id: result.id, number: result.number, region: result.region, prefecture: result.prefecture, address: result.address };
 }
 
-export function deleteBranch(id: string): boolean {
-  const branches = getBranches();
-  const filtered = branches.filter(b => b.id !== id);
-  if (filtered.length === branches.length) return false;
-  localStorage.setItem(BRANCHES_KEY, JSON.stringify(filtered));
+export async function deleteBranch(id: string): Promise<boolean> {
+  await apiManageBranch('delete', { id });
   return true;
 }
 
 // ===== USERS =====
 
-export function getUsers(): User[] {
-  const data = localStorage.getItem(USERS_KEY);
-  return data ? JSON.parse(data) : [];
+export async function getUsers(): Promise<User[]> {
+  const dtos = await apiGetAllUsers();
+  return dtos.map(userDtoToModel);
 }
 
-export function getUserById(id: string): User | undefined {
-  return getUsers().find(u => u.id === id);
+export async function getUserById(id: string): Promise<User | undefined> {
+  const users = await getUsers();
+  return users.find(u => u.id === id);
 }
 
-export function getUserByUsername(username: string): User | undefined {
-  return getUsers().find(u => u.username.toLowerCase() === username.toLowerCase());
+export async function getUserByUsername(username: string): Promise<User | undefined> {
+  const users = await getUsers();
+  return users.find(u => u.username.toLowerCase() === username.toLowerCase());
 }
 
-export function getUserByTelegram(tg: string): User | undefined {
-  return getUsers().find(u => u.telegramUsername.toLowerCase() === tg.toLowerCase());
+export async function getUserByTelegram(tg: string): Promise<User | undefined> {
+  const users = await getUsers();
+  const norm = tg.replace(/^@/, '').toLowerCase();
+  return users.find(u => u.telegramUsername.replace(/^@/, '').toLowerCase() === norm);
 }
 
-export function createUser(userData: Omit<User, 'id' | 'createdAt' | 'isAdmin'>): User {
-  const users = getUsers();
-  const newUser: User = {
-    ...userData,
-    id: generateId(),
-    isAdmin: false,
-    createdAt: new Date().toISOString(),
-  };
-  users.push(newUser);
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
-  return newUser;
+export async function makeAdmin(userId: string): Promise<void> {
+  await apiManageUser('makeAdmin', userId);
 }
 
-export function updateUser(id: string, data: Partial<User>): User | undefined {
-  const users = getUsers();
-  const index = users.findIndex(u => u.id === id);
-  if (index === -1) return undefined;
-  users[index] = { ...users[index], ...data };
-  localStorage.setItem(USERS_KEY, JSON.stringify(users));
-  return users[index];
+export async function removeAdmin(userId: string): Promise<void> {
+  await apiManageUser('removeAdmin', userId);
 }
 
-export function makeAdmin(userId: string): User | undefined {
-  return updateUser(userId, { isAdmin: true });
-}
-
-export function removeAdmin(userId: string): User | undefined {
-  return updateUser(userId, { isAdmin: false });
-}
-
-export function deleteUser(userId: string): boolean {
-  const users = getUsers();
-  const filtered = users.filter(u => u.id !== userId);
-  if (filtered.length === users.length) return false;
-  localStorage.setItem(USERS_KEY, JSON.stringify(filtered));
+export async function deleteUser(userId: string): Promise<boolean> {
+  await apiManageUser('delete', userId);
   return true;
+}
+
+export async function updateUserBalance(userId: string, balance: number): Promise<void> {
+  await apiManageUser('updateBalance', userId, { balance });
 }
 
 // ===== PARCELS =====
 
-export function getParcels(): Parcel[] {
-  const data = localStorage.getItem(PARCELS_KEY);
-  return data ? JSON.parse(data) : [];
+export async function getParcels(): Promise<Parcel[]> {
+  const dtos = await apiGetParcels();
+  return dtos.map(parcelDtoToModel);
 }
 
-export function getParcelById(id: string): Parcel | undefined {
-  return getParcels().find(p => p.id === id);
+export async function getParcelById(id: string): Promise<Parcel | undefined> {
+  const parcels = await getParcels();
+  return parcels.find(p => p.id === id);
 }
 
-export function getParcelByTTN(ttn: string): Parcel | undefined {
-  return getParcels().find(p => p.ttn.toLowerCase() === ttn.toLowerCase());
+export async function getParcelByTTN(ttn: string): Promise<Parcel | undefined> {
+  const parcels = await getParcels();
+  return parcels.find(p => p.ttn.toLowerCase() === ttn.toLowerCase());
 }
 
-export function getUserParcels(userId: string): Parcel[] {
-  return getParcels().filter(p => p.senderId === userId || p.receiverId === userId);
+export async function getUserParcels(userId: string): Promise<Parcel[]> {
+  const all = await getParcels();
+  return all.filter(p => p.senderId === userId || p.receiverId === userId);
 }
 
-export function createParcel(parcelData: {
+export async function createParcel(data: {
   description: string;
   senderId: string;
   receiverId: string;
@@ -197,67 +156,61 @@ export function createParcel(parcelData: {
   toCoordinates: string | null;
   cashOnDelivery: boolean;
   cashOnDeliveryAmount: number;
-}): Parcel {
-  const parcels = getParcels();
-  const now = new Date().toISOString();
-  const newParcel: Parcel = {
-    ...parcelData,
-    id: generateId(),
-    ttn: generateTTN(),
-    status: 1,
-    statusHistory: [{ status: 1, label: STATUS_LABELS[1], timestamp: now }],
-    cashOnDeliveryPaid: false,
-    cashOnDeliveryConfirmed: false,
-    createdAt: now,
-    updatedAt: now,
-  };
-  parcels.push(newParcel);
-  localStorage.setItem(PARCELS_KEY, JSON.stringify(parcels));
-  return newParcel;
+}): Promise<Parcel> {
+  const dto = await apiCreateParcel({
+    description:          data.description,
+    receiverUsername:     data.receiverUsername,
+    fromBranchId:         data.fromBranchId,
+    toBranchId:           data.toBranchId,
+    toCoordinates:        data.toCoordinates,
+    cashOnDelivery:       data.cashOnDelivery,
+    cashOnDeliveryAmount: data.cashOnDeliveryAmount,
+  });
+  return parcelDtoToModel(dto);
 }
 
-export function updateParcel(id: string, data: Partial<Parcel>): Parcel | undefined {
-  const parcels = getParcels();
-  const index = parcels.findIndex(p => p.id === id);
-  if (index === -1) return undefined;
-  parcels[index] = { ...parcels[index], ...data, updatedAt: new Date().toISOString() };
-  localStorage.setItem(PARCELS_KEY, JSON.stringify(parcels));
-  return parcels[index];
+export async function updateParcelStatus(id: string, newStatus: number): Promise<Parcel | undefined> {
+  const dto = await apiUpdateParcel(id, 'updateStatus', { newStatus });
+  return parcelDtoToModel(dto);
 }
 
-export function updateParcelStatus(id: string, newStatus: number): Parcel | undefined {
-  const parcel = getParcelById(id);
-  if (!parcel) return undefined;
-  const now = new Date().toISOString();
-  const updatedHistory = [
-    ...parcel.statusHistory,
-    { status: newStatus, label: STATUS_LABELS[newStatus], timestamp: now },
-  ];
-  return updateParcel(id, { status: newStatus, statusHistory: updatedHistory });
+export async function markParcelPaid(id: string): Promise<Parcel | undefined> {
+  const dto = await apiUpdateParcel(id, 'markPaid');
+  return parcelDtoToModel(dto);
 }
 
-export function deleteParcel(id: string): boolean {
-  const parcels = getParcels();
-  const filtered = parcels.filter(p => p.id !== id);
-  if (filtered.length === parcels.length) return false;
-  localStorage.setItem(PARCELS_KEY, JSON.stringify(filtered));
+export async function confirmParcelPayment(id: string): Promise<Parcel | undefined> {
+  const dto = await apiUpdateParcel(id, 'confirmPayment');
+  return parcelDtoToModel(dto);
+}
+
+export async function updateParcel(id: string, data: {
+  description?: string;
+  fromBranchId?: string;
+  toBranchId?: string | null;
+  toCoordinates?: string | null;
+}): Promise<Parcel | undefined> {
+  const dto = await apiUpdateParcel(id, 'adminUpdate', data);
+  return parcelDtoToModel(dto);
+}
+
+export async function deleteParcel(id: string): Promise<boolean> {
+  await apiDeleteParcel(id);
   return true;
-}
-
-export function markParcelPaid(id: string): Parcel | undefined {
-  return updateParcel(id, { cashOnDeliveryPaid: true });
-}
-
-export function confirmParcelPayment(id: string): Parcel | undefined {
-  return updateParcel(id, { cashOnDeliveryConfirmed: true });
 }
 
 // ===== STATS =====
 
-export function getUserStats(userId: string): { sent: number; received: number; active: number } {
-  const parcels = getUserParcels(userId);
-  const sent = parcels.filter(p => p.senderId === userId).length;
-  const received = parcels.filter(p => p.receiverId === userId).length;
-  const active = parcels.filter(p => p.status < 7).length;
-  return { sent, received, active };
+export async function getUserStats(userId: string): Promise<{ sent: number; received: number; active: number }> {
+  const parcels = await getUserParcels(userId);
+  return {
+    sent:     parcels.filter(p => p.senderId === userId).length,
+    received: parcels.filter(p => p.receiverId === userId).length,
+    active:   parcels.filter(p => p.status < 7).length,
+  };
+}
+
+// ===== TTN генерация — теперь на сервере, здесь заглушка =====
+export function generateTTN(): string {
+  return '#????'; // генерируется сервером при создании посылки
 }

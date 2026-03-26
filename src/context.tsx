@@ -1,15 +1,17 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { User } from './types';
-import { initDB, getUserByUsername, createUser as dbCreateUser, getUserById } from './db';
 import { motion, AnimatePresence } from 'framer-motion';
 import { CheckCircle, XCircle, Info, X } from 'lucide-react';
+import {
+  apiLogin, apiLogout, apiRegister, apiGetProfile,
+  setToken, getToken,
+  type UserDTO,
+} from './api';
 
-// ===== TELEGRAM BOT API =====
+// ===== TELEGRAM helpers (клиентские) =====
 
 const BOT_TOKEN = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BOT_TOKEN) || '8656385676:AAGHHDZYqgmZVoaSzZaMadFeTjjoU3ieLb4';
 const WEBAPP_URL = 'https://kbpost.vercel.app';
 
-// Отправить сообщение с inline web_app кнопкой
 async function sendTelegramMessage(chatId: string | number, text: string, withButton = true) {
   if (!BOT_TOKEN || !chatId) return;
   try {
@@ -29,63 +31,68 @@ async function sendTelegramMessage(chatId: string | number, text: string, withBu
   }
 }
 
-// Получить chatId пользователя по его TG username из localStorage
-function getChatId(telegramUsername: string): string | null {
-  const key = `kbpost_tg_chatid_${telegramUsername.toLowerCase().replace('@', '')}`;
-  return localStorage.getItem(key);
-}
-
 export async function sendTelegramNotification(chatId: string | number, message: string) {
   await sendTelegramMessage(chatId, message, true);
 }
 
-// Отправляет приветственное сообщение пользователю после регистрации
-export async function sendRegistrationNotification(telegramUsername: string, siteUsername: string) {
-  const chatId = getChatId(telegramUsername);
-  if (!chatId) return;
-  await sendTelegramMessage(chatId,
-    `🎉 <b>Добро пожаловать в kbpost!</b>\n\nВы успешно зарегистрировались как <code>${siteUsername}</code>.\n\nТеперь вы можете отправлять и получать посылки.`,
-    true
-  );
-}
-
-// Уведомление о создании посылки — вызывается из CreatePage
-export function notifyParcelCreated(senderTg: string, receiverTg: string, ttn: string) {
-  const senderChatId = getChatId(senderTg);
-  const receiverChatId = getChatId(receiverTg);
-  if (senderChatId) {
-    sendTelegramMessage(senderChatId, `📤 Вы создали новую посылку\nТТН: <code>${ttn}</code>`, true);
-  }
-  if (receiverChatId) {
-    sendTelegramMessage(receiverChatId, `📥 Для вас создана новая посылка!\nТТН: <code>${ttn}</code>`, true);
-  }
-}
-
+export async function sendRegistrationNotification(_tg: string, _username: string) {}
+export function notifyParcelCreated(_s: string, _r: string, _ttn: string) {}
 export function sendNotification(message: string) {
-  console.log('[kbpost notification]:', message);
+  console.log('[kbpost]', message);
+}
+
+// ===== USER TYPE =====
+
+export interface User {
+  id: string;
+  username: string;
+  telegramUsername: string;
+  telegramId: string | null;
+  password: string;
+  citizenship: string;
+  account: string;
+  isAdmin: boolean;
+  balance: number;
+  createdAt: string;
+}
+
+function dtoToUser(dto: UserDTO): User {
+  return {
+    id:               dto.id,
+    username:         dto.username,
+    telegramUsername: dto.telegramId ? `@${dto.telegramId}` : '',
+    telegramId:       dto.telegramId ?? null,
+    password:         '',
+    citizenship:      dto.citizenship,
+    account:          dto.account,
+    isAdmin:          dto.isAdmin,
+    balance:          dto.balance,
+    createdAt:        dto.createdAt || new Date().toISOString(),
+  };
 }
 
 // ===== AUTH CONTEXT =====
 
 interface AuthContextType {
   user: User | null;
-  login: (username: string, password: string) => boolean;
+  loading: boolean;
+  login: (username: string, password: string) => Promise<boolean>;
   register: (data: {
     username: string;
     telegramUsername: string;
     password: string;
     citizenship: string;
     account: string;
-  }) => { success: boolean; error?: string };
-  logout: () => void;
-  refreshUser: () => void;
+  }) => Promise<{ success: boolean; error?: string }>;
+  logout: () => Promise<void>;
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function useAuth() {
   const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+  if (!ctx) throw new Error('useAuth must be used within AppProvider');
   return ctx;
 }
 
@@ -105,7 +112,7 @@ const ToastContext = createContext<ToastContextType | null>(null);
 
 export function useToast() {
   const ctx = useContext(ToastContext);
-  if (!ctx) throw new Error('useToast must be used within ToastProvider');
+  if (!ctx) throw new Error('useToast must be used within AppProvider');
   return ctx;
 }
 
@@ -117,79 +124,71 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    initDB();
-    const savedUserId = localStorage.getItem('kbpost_current_user_id');
-    if (savedUserId) {
-      const freshUser = getUserById(savedUserId);
-      if (freshUser) setUser(freshUser);
-    }
-    setLoading(false);
+    const token = getToken();
+    if (!token) { setLoading(false); return; }
+    apiGetProfile()
+      .then(dto => setUser(dtoToUser(dto)))
+      .catch(() => setToken(null))
+      .finally(() => setLoading(false));
   }, []);
 
-  const login = (username: string, password: string): boolean => {
-    const found = getUserByUsername(username);
-    if (found && found.password === password) {
-      setUser(found);
-      localStorage.setItem('kbpost_current_user_id', found.id);
+  const login = async (username: string, password: string): Promise<boolean> => {
+    try {
+      const { token, user: dto } = await apiLogin(username, password);
+      setToken(token);
+      setUser(dtoToUser(dto));
       return true;
+    } catch {
+      return false;
     }
-    return false;
   };
 
-  const register = (data: {
+  const register = async (data: {
     username: string;
     telegramUsername: string;
     password: string;
     citizenship: string;
     account: string;
-  }) => {
-    if (!data.username.trim()) return { success: false, error: 'Введите никнейм' };
-    if (!data.telegramUsername.trim()) return { success: false, error: 'Введите Telegram @username' };
+  }): Promise<{ success: boolean; error?: string }> => {
+    if (!data.username.trim())         return { success: false, error: 'Введите никнейм' };
+    if (!data.telegramUsername.trim()) return { success: false, error: 'Привяжите Telegram' };
     if (!data.password.trim() || data.password.length < 4)
       return { success: false, error: 'Пароль должен быть от 4 символов' };
     if (!data.citizenship.trim()) return { success: false, error: 'Выберите гражданство' };
-    if (!data.account.trim()) return { success: false, error: 'Укажите счёт' };
+    if (!data.account.trim())     return { success: false, error: 'Укажите счёт' };
 
-    const existing = getUserByUsername(data.username);
-    if (existing) return { success: false, error: 'Пользователь с таким никнеймом уже существует' };
-
-    const tgFormatted = data.telegramUsername.startsWith('@')
-      ? data.telegramUsername
-      : `@${data.telegramUsername}`;
-
-    const newUser = dbCreateUser({
-      username: data.username,
-      telegramUsername: tgFormatted,
-      password: data.password,
-      citizenship: data.citizenship,
-      account: data.account,
-    });
-    setUser(newUser);
-    localStorage.setItem('kbpost_current_user_id', newUser.id);
-    sendNotification(`Добро пожаловать в kbpost, ${newUser.username}!`);
-    return { success: true };
-  };
-
-  const logout = () => {
-    setUser(null);
-    localStorage.removeItem('kbpost_current_user_id');
-  };
-
-  const refreshUser = () => {
-    if (user) {
-      const freshUser = getUserById(user.id);
-      if (freshUser) {
-        setUser(freshUser);
-      }
+    try {
+      const { token, user: dto } = await apiRegister({
+        username:        data.username.trim(),
+        password:        data.password,
+        telegramUsername: data.telegramUsername.replace(/^@/, ''),
+        citizenship:     data.citizenship.trim(),
+        account:         data.account.trim(),
+      });
+      setToken(token);
+      setUser(dtoToUser(dto));
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err.message || 'Ошибка регистрации' };
     }
+  };
+
+  const logout = async () => {
+    await apiLogout();
+    setUser(null);
+  };
+
+  const refreshUser = async () => {
+    try {
+      const dto = await apiGetProfile();
+      setUser(dtoToUser(dto));
+    } catch {}
   };
 
   const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     const id = Math.random().toString(36).substring(2);
     setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => {
-      setToasts(prev => prev.filter(t => t.id !== id));
-    }, 4000);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
 
   const removeToast = useCallback((id: string) => {
@@ -214,11 +213,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, login, register, logout, refreshUser }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, refreshUser }}>
       <ToastContext.Provider value={{ addToast }}>
         {children}
-
-        {/* Toast container — centered */}
         <div className="fixed top-4 left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-sm z-[100] flex flex-col gap-2 pointer-events-none items-center">
           <AnimatePresence>
             {toasts.map(toast => (

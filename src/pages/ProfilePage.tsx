@@ -1,6 +1,6 @@
-import { useState, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { useAuth, useToast } from '../context';
-import { updateUser, getUserStats } from '../db';
+import { apiGetParcels, apiGetProfile } from '../api';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Lock, Eye, EyeOff, LogOut, Save, Shield, Globe,
@@ -22,6 +22,8 @@ export default function ProfilePage() {
   const { user, logout, refreshUser } = useAuth();
   const { addToast } = useToast();
 
+  const [stats, setStats] = useState({ sent: 0, received: 0, active: 0 });
+
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -29,45 +31,67 @@ export default function ProfilePage() {
   const [showNewPass, setShowNewPass] = useState(false);
   const [showConfirmPass, setShowConfirmPass] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
+  const [savingPassword, setSavingPassword] = useState(false);
 
   const [changingAccount, setChangingAccount] = useState(false);
   const [newAccount, setNewAccount] = useState('');
+  const [savingAccount, setSavingAccount] = useState(false);
 
-  const stats = useMemo(() => {
-    if (!user) return { sent: 0, received: 0, active: 0 };
-    return getUserStats(user.id);
+  // Загружаем статистику
+  useEffect(() => {
+    if (!user) return;
+    apiGetParcels()
+      .then(parcels => {
+        const userParcels = parcels.filter(p => p.senderId === user.id || p.receiverId === user.id);
+        setStats({
+          sent:     userParcels.filter(p => p.senderId === user.id).length,
+          received: userParcels.filter(p => p.receiverId === user.id).length,
+          active:   userParcels.filter(p => p.status < 7).length,
+        });
+      })
+      .catch(() => {});
   }, [user]);
 
   if (!user) return null;
 
-  const handleChangePassword = (e: React.FormEvent) => {
+  const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (oldPassword !== user.password) {
-      addToast('Неверный текущий пароль', 'error');
-      return;
-    }
     if (newPassword.length < 4) {
       addToast('Новый пароль должен быть от 4 символов', 'error');
-      return;
-    }
-    if (newPassword === user.password) {
-      addToast('Новый пароль не может совпадать с текущим', 'error');
       return;
     }
     if (newPassword !== confirmPassword) {
       addToast('Пароли не совпадают', 'error');
       return;
     }
-    updateUser(user.id, { password: newPassword });
-    refreshUser();
-    setOldPassword('');
-    setNewPassword('');
-    setConfirmPassword('');
-    setChangingPassword(false);
-    addToast('Пароль успешно изменён! 🔒', 'success');
+    // Смена пароля: пробуем через /api/user/change-password
+    setSavingPassword(true);
+    try {
+      const { getToken } = await import('../api');
+      const res = await fetch('/api/user/change-password', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${getToken()}`,
+        },
+        body: JSON.stringify({ oldPassword, newPassword }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Ошибка');
+      setOldPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      setChangingPassword(false);
+      addToast('Пароль успешно изменён! 🔒', 'success');
+    } catch (err: any) {
+      addToast(err.message || 'Ошибка смены пароля', 'error');
+    } finally {
+      setSavingPassword(false);
+    }
   };
 
-  const handleChangeAccount = (e: React.FormEvent) => {
+  const handleChangeAccount = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newAccount.trim()) {
       addToast('Введите название счёта', 'error');
@@ -77,11 +101,29 @@ export default function ProfilePage() {
       addToast('Новый счёт не может совпадать с текущим', 'error');
       return;
     }
-    updateUser(user.id, { account: newAccount.trim() });
-    refreshUser();
-    setNewAccount('');
-    setChangingAccount(false);
-    addToast('Счёт успешно изменён! 💳', 'success');
+    setSavingAccount(true);
+    try {
+      const { getToken } = await import('../api');
+      const res = await fetch('/api/user/update-account', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${getToken()}`,
+        },
+        body: JSON.stringify({ account: newAccount.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Ошибка');
+      await refreshUser();
+      setNewAccount('');
+      setChangingAccount(false);
+      addToast('Счёт успешно изменён! 💳', 'success');
+    } catch (err: any) {
+      addToast(err.message || 'Ошибка смены счёта', 'error');
+    } finally {
+      setSavingAccount(false);
+    }
   };
 
   return (
@@ -110,7 +152,7 @@ export default function ProfilePage() {
         <h2 className="text-xl font-bold">{user.username}</h2>
         <p className="text-sm text-dark-400 flex items-center gap-1.5 mt-1">
           <TelegramIcon size={14} />
-          {user.telegramUsername}
+          {user.telegramUsername || '—'}
         </p>
         {user.isAdmin && (
           <span className="mt-2 text-xs font-semibold text-red-400 bg-red-500/10 px-3 py-1 rounded-full border border-red-500/20">
@@ -127,9 +169,9 @@ export default function ProfilePage() {
         className="grid grid-cols-3 gap-2"
       >
         {[
-          { icon: <Send size={16} />, label: 'Отправлено', value: stats.sent, color: 'text-blue-400' },
-          { icon: <Inbox size={16} />, label: 'Получено', value: stats.received, color: 'text-green-400' },
-          { icon: <Package size={16} />, label: 'Активных', value: stats.active, color: 'text-orange-400' },
+          { icon: <Send size={16} />,    label: 'Отправлено', value: stats.sent,     color: 'text-blue-400' },
+          { icon: <Inbox size={16} />,   label: 'Получено',   value: stats.received,  color: 'text-green-400' },
+          { icon: <Package size={16} />, label: 'Активных',   value: stats.active,    color: 'text-orange-400' },
         ].map((stat, i) => (
           <div key={i} className="glass-card-static p-3 text-center">
             <div className={`flex justify-center mb-1.5 ${stat.color}`}>{stat.icon}</div>
@@ -147,7 +189,6 @@ export default function ProfilePage() {
         className="glass-card-static p-5 space-y-3"
       >
         <h3 className="text-sm font-bold text-dark-300 uppercase tracking-wider">Информация</h3>
-
         <div className="space-y-3">
           <div className="flex items-center gap-3">
             <Globe size={16} className="text-dark-400 flex-shrink-0" />
@@ -213,16 +254,11 @@ export default function ProfilePage() {
                     value={oldPassword}
                     onChange={e => setOldPassword(e.target.value)}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowOldPass(!showOldPass)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-400"
-                  >
+                  <button type="button" onClick={() => setShowOldPass(!showOldPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-400">
                     {showOldPass ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
                 </div>
               </div>
-
               <div>
                 <label className="block text-xs font-medium text-dark-400 mb-1">Новый пароль</label>
                 <div className="relative">
@@ -233,16 +269,11 @@ export default function ProfilePage() {
                     value={newPassword}
                     onChange={e => setNewPassword(e.target.value)}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowNewPass(!showNewPass)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-400"
-                  >
+                  <button type="button" onClick={() => setShowNewPass(!showNewPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-400">
                     {showNewPass ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
                 </div>
               </div>
-
               <div>
                 <label className="block text-xs font-medium text-dark-400 mb-1">Повторите пароль</label>
                 <div className="relative">
@@ -253,32 +284,22 @@ export default function ProfilePage() {
                     value={confirmPassword}
                     onChange={e => setConfirmPassword(e.target.value)}
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowConfirmPass(!showConfirmPass)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-400"
-                  >
+                  <button type="button" onClick={() => setShowConfirmPass(!showConfirmPass)} className="absolute right-3 top-1/2 -translate-y-1/2 text-dark-400">
                     {showConfirmPass ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
                 </div>
               </div>
-
               <div className="flex gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={() => {
-                    setChangingPassword(false);
-                    setOldPassword('');
-                    setNewPassword('');
-                    setConfirmPassword('');
-                  }}
+                  onClick={() => { setChangingPassword(false); setOldPassword(''); setNewPassword(''); setConfirmPassword(''); }}
                   className="btn-secondary flex-1 text-sm"
                 >
                   Отмена
                 </button>
-                <button type="submit" className="btn-primary flex-1 text-sm">
+                <button type="submit" disabled={savingPassword} className="btn-primary flex-1 text-sm disabled:opacity-50">
                   <Save size={14} />
-                  Сохранить
+                  {savingPassword ? 'Сохраняем...' : 'Сохранить'}
                 </button>
               </div>
             </motion.form>
@@ -305,7 +326,6 @@ export default function ProfilePage() {
             <p className="text-xs text-dark-500">Текущий: {user.account}</p>
           </div>
         </button>
-
         <AnimatePresence>
           {changingAccount && (
             <motion.form
@@ -327,16 +347,12 @@ export default function ProfilePage() {
                 />
               </div>
               <div className="flex gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => { setChangingAccount(false); setNewAccount(''); }}
-                  className="btn-secondary flex-1 text-sm"
-                >
+                <button type="button" onClick={() => { setChangingAccount(false); setNewAccount(''); }} className="btn-secondary flex-1 text-sm">
                   Отмена
                 </button>
-                <button type="submit" className="btn-primary flex-1 text-sm">
+                <button type="submit" disabled={savingAccount} className="btn-primary flex-1 text-sm disabled:opacity-50">
                   <Save size={14} />
-                  Сохранить
+                  {savingAccount ? 'Сохраняем...' : 'Сохранить'}
                 </button>
               </div>
             </motion.form>
@@ -345,21 +361,11 @@ export default function ProfilePage() {
       </motion.div>
 
       {/* Reset password via bot */}
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.19 }}
-      >
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.19 }}>
         <button
           type="button"
           onClick={() => {
-            if (user) {
-              window.open(
-                `https://t.me/kbpostbot?start=reset_${encodeURIComponent(user.username)}`,
-                '_blank',
-                'noopener,noreferrer'
-              );
-            }
+            window.open(`https://t.me/kbpostbot?start=reset_${encodeURIComponent(user.username)}`, '_blank', 'noopener,noreferrer');
           }}
           className="w-full flex items-center gap-3 p-5 glass-card-static text-left hover:bg-white/[0.06] transition-colors"
         >
@@ -374,13 +380,9 @@ export default function ProfilePage() {
       </motion.div>
 
       {/* Logout */}
-      <motion.div
-        initial={{ opacity: 0, y: 10 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ delay: 0.2 }}
-      >
+      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
         <button
-          onClick={logout}
+          onClick={() => logout()}
           className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-red-400 bg-red-500/10 border border-red-500/20 text-sm font-semibold hover:bg-red-500/15 transition-colors"
         >
           <LogOut size={16} />
