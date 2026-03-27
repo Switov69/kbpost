@@ -103,7 +103,7 @@ module.exports = async function handler(req, res) {
 
     if (action === 'confirm' && req.method === 'POST') {
         const { token, password } = req.body;
-        const rows = await sql`SELECT * FROM pending_actions WHERE token = ${token}::uuid AND expires_at > NOW()`;
+        const rows = await sql`SELECT * FROM pending_actions WHERE token = ${token} AND expires_at > NOW()`;
         if (!rows.length) return res.status(404).json({ error: 'Токен не найден' });
         
         const { action_type, data } = rows[0];
