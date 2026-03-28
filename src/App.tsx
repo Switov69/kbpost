@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppProvider, useAuth } from './context';
 import Layout from './components/Layout';
@@ -88,9 +89,8 @@ function AppRoutes() {
 }
 
 export default function App() {
-  // Вставляем этот блок useEffect здесь:
+  // Инициализация Telegram WebApp
   useEffect(() => {
-    // Обращаемся к объекту Telegram через window
     const tg = (window as any).Telegram?.WebApp;
     
     if (tg) {
@@ -99,7 +99,6 @@ export default function App() {
     }
   }, []);
 
-export default function App() {
   return (
     <HashRouter>
       <AppProvider>
