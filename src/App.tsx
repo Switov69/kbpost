@@ -88,6 +88,18 @@ function AppRoutes() {
 }
 
 export default function App() {
+  // Вставляем этот блок useEffect здесь:
+  useEffect(() => {
+    // Обращаемся к объекту Telegram через window
+    const tg = (window as any).Telegram?.WebApp;
+    
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+  }, []);
+
+export default function App() {
   return (
     <HashRouter>
       <AppProvider>
