@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuth, useToast, sendNotification } from '../context';
-import { apiGetParcel, apiUpdateParcel, apiGetBranches, type ParcelDTO, type BranchDTO } from '../api';
+import { apiGetParcels, apiUpdateParcel, apiGetBranches, type ParcelDTO, type BranchDTO } from '../api';
 import { STATUS_LABELS, STATUS_COLORS, getBranchDisplay } from '../types';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -31,20 +31,12 @@ export default function ParcelDetailPage() {
   const fetchData = useCallback(async () => {
     if (!id) return;
     try {
-      // Загружаем посылку и отделения параллельно
-      // apiGetParcel(id) — тянет одну посылку со status_history (без загрузки всего списка)
-      const [foundParcel, branchList] = await Promise.all([
-        apiGetParcel(id),
-        apiGetBranches(),
-      ]);
-      setParcel(foundParcel);
+      const [parcels, branchList] = await Promise.all([apiGetParcels(), apiGetBranches()]);
+      const found = parcels.find(p => p.id === id);
+      setParcel(found || null);
       setBranches(branchList);
-    } catch (err: any) {
-      if (err?.message?.includes('404') || err?.message?.includes('не найдена')) {
-        setParcel(null);
-      } else {
-        addToast('Не удалось загрузить данные', 'error');
-      }
+    } catch {
+      addToast('Не удалось загрузить данные', 'error');
     } finally {
       setLoading(false);
     }

@@ -1,24 +1,19 @@
-const bcrypt = require('bcryptjs');
-const { getDB } = require('./_db');
-const { getSessionUser, corsHeaders } = require('./_auth');
+// api/auth.js — авторизация, регистрация, токены бота
+// Все ID и токены хранятся как TEXT. Никаких ::uuid приведений.
 
-function mapUser(u) {
-  const now = new Date();
-  const subExpires = u.subscription_expires ? new Date(u.subscription_expires) : null;
-  const subscriptionActive = u.subscription_active && subExpires && subExpires > now;
-  return {
-    id: u.id,
-    username: u.username,
-    isAdmin: u.is_admin,
-    telegramId: u.telegram_id,
-    telegramUsername: u.telegram_id ? `@${u.telegram_id}` : '',
-    citizenship: u.citizenship,
-    account: u.account,
-    balance: u.balance,
-    createdAt: u.created_at,
-    subscriptionActive: !!subscriptionActive,
-    subscriptionExpires: u.subscription_expires || null,
-  };
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const { getDB } = require('./_db');
+const { corsHeaders, getSessionUser } = require('./_auth');
+
+// Генерирует случайную строку для использования как TEXT-токен или TEXT-ID
+function generateId() {
+  return crypto.randomUUID();
+}
+
+// Генерирует короткий TEXT-ID для пользователей (8 символов hex)
+function generateUserId() {
+  return crypto.randomBytes(8).toString('hex');
 }
 
 module.exports = async function handler(req, res) {
@@ -26,164 +21,256 @@ module.exports = async function handler(req, res) {
   Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const session = await getSessionUser(req);
-  if (!session) return res.status(401).json({ error: 'Не авторизован' });
-
   const sql = getDB();
 
   try {
-    // ===== GET =====
-    if (req.method === 'GET') {
-      const { type } = req.query;
+    const { action } = req.body || req.query || {};
 
-      if (type === 'all') {
-        if (!session.isAdmin) return res.status(403).json({ error: 'Нет доступа' });
-        const users = await sql`
-          SELECT id, username, is_admin, telegram_id, citizenship, account, balance,
-                 subscription_active, subscription_expires, created_at
-          FROM users ORDER BY created_at ASC
-        `;
-        return res.status(200).json(users.map(mapUser));
+    // ===== 1. LOGIN =====
+    if (action === 'login' && req.method === 'POST') {
+      const { username, password } = req.body;
+      if (!username || !password) {
+        return res.status(400).json({ error: 'Заполните все поля' });
       }
 
-      // Список запросов на подписку (admin)
-      if (type === 'subscriptionRequests') {
-        if (!session.isAdmin) return res.status(403).json({ error: 'Нет доступа' });
-        const requests = await sql`
-          SELECT id, user_id, username, amount, status, created_at
-          FROM subscription_requests
-          WHERE status = 'pending'
-          ORDER BY created_at ASC
-        `;
-        return res.status(200).json(requests.map(r => ({
-          id: r.id,
-          userId: r.user_id,
-          username: r.username,
-          amount: r.amount,
-          status: r.status,
-          createdAt: r.created_at,
-        })));
-      }
-
-      // Профиль текущего пользователя (Удалено ::uuid)
+      // Поиск пользователя по никнейму (TEXT сравнение, без ::uuid)
       const rows = await sql`
-        SELECT id, username, is_admin, telegram_id, citizenship, account, balance,
-               subscription_active, subscription_expires, created_at
-        FROM users WHERE id = ${session.userId} LIMIT 1
+        SELECT id, username, password_hash, is_admin, telegram_id,
+               citizenship, account, balance, created_at,
+               subscription_active, subscription_expires
+        FROM users
+        WHERE LOWER(username) = LOWER(${username})
+        LIMIT 1
       `;
-      if (!rows.length) return res.status(404).json({ error: 'Пользователь не найден' });
-      return res.status(200).json(mapUser(rows[0]));
+
+      if (!rows.length) {
+        return res.status(401).json({ error: 'Неверный никнейм или пароль' });
+      }
+
+      const user = rows[0];
+      const passwordMatch = await bcrypt.compare(password, user.password_hash);
+      if (!passwordMatch) {
+        return res.status(401).json({ error: 'Неверный никнейм или пароль' });
+      }
+
+      // Генерируем новый TEXT-токен сессии
+      const token = generateId();
+
+      // Вставляем сессию. user_id — TEXT, token — TEXT, без ::uuid
+      await sql`
+        INSERT INTO sessions (token, user_id)
+        VALUES (${token}, ${user.id})
+      `;
+
+      // Принудительно перезаписываем cookie при каждом успешном входе,
+      // чтобы вытеснить старые невалидные токены из браузера.
+      res.setHeader('Set-Cookie',
+        `kbpost_session=${token}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${30 * 24 * 3600}`
+      );
+
+      const now = new Date();
+      const subExpires = user.subscription_expires ? new Date(user.subscription_expires) : null;
+      const subscriptionActive = user.subscription_active && subExpires && subExpires > now;
+
+      return res.status(200).json({
+        token,
+        user: {
+          id:                  user.id,
+          username:            user.username,
+          isAdmin:             user.is_admin,
+          telegramId:          user.telegram_id,
+          telegramUsername:    user.telegram_id ? `@${user.telegram_id}` : '',
+          citizenship:         user.citizenship,
+          account:             user.account,
+          balance:             user.balance,
+          createdAt:           user.created_at,
+          subscriptionActive:  !!subscriptionActive,
+          subscriptionExpires: user.subscription_expires || null,
+        },
+      });
     }
 
-    // ===== POST =====
-    if (req.method === 'POST') {
-      const { action } = req.body;
+    // ===== 2. REGISTER =====
+    if (action === 'register' && req.method === 'POST') {
+      const { username, password, telegramUsername, citizenship, account } = req.body;
 
-      // Смена пароля
-      if (action === 'changePassword') {
-        const { oldPassword, newPassword } = req.body;
-        if (!newPassword || newPassword.length < 4)
+      if (!username?.trim() || !password || password.length < 4 ||
+          !telegramUsername?.trim() || !citizenship?.trim() || !account?.trim()) {
+        return res.status(400).json({ error: 'Заполните все поля (пароль мин. 4 символа)' });
+      }
+
+      // Проверяем уникальность никнейма
+      const existing = await sql`
+        SELECT id FROM users WHERE LOWER(username) = LOWER(${username.trim()}) LIMIT 1
+      `;
+      if (existing.length) {
+        return res.status(409).json({ error: 'Пользователь с таким никнеймом уже существует' });
+      }
+
+      // Нормализуем telegram_id (без @, нижний регистр)
+      const tgNorm = telegramUsername.replace(/^@/, '').toLowerCase();
+      const tgExisting = await sql`
+        SELECT id FROM users WHERE telegram_id = ${tgNorm} LIMIT 1
+      `;
+      if (tgExisting.length) {
+        return res.status(409).json({ error: 'Этот Telegram уже привязан к другому аккаунту' });
+      }
+
+      const passwordHash = await bcrypt.hash(password, 10);
+      const newUserId = generateUserId(); // TEXT ID
+
+      // Вставляем пользователя с явным TEXT id, без gen_random_uuid()
+      await sql`
+        INSERT INTO users (id, username, password_hash, telegram_id, citizenship, account, is_admin)
+        VALUES (${newUserId}, ${username.trim()}, ${passwordHash}, ${tgNorm}, ${citizenship.trim()}, ${account.trim()}, FALSE)
+      `;
+
+      // Получаем созданного пользователя
+      const newUserRows = await sql`
+        SELECT id, username, is_admin, telegram_id, citizenship, account, balance, created_at
+        FROM users WHERE id = ${newUserId} LIMIT 1
+      `;
+      const user = newUserRows[0];
+
+      // Создаём сессию
+      const token = generateId();
+      await sql`
+        INSERT INTO sessions (token, user_id)
+        VALUES (${token}, ${user.id})
+      `;
+
+      res.setHeader('Set-Cookie',
+        `kbpost_session=${token}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${30 * 24 * 3600}`
+      );
+
+      return res.status(201).json({
+        token,
+        user: {
+          id:                  user.id,
+          username:            user.username,
+          isAdmin:             user.is_admin,
+          telegramId:          user.telegram_id,
+          telegramUsername:    user.telegram_id ? `@${user.telegram_id}` : '',
+          citizenship:         user.citizenship,
+          account:             user.account,
+          balance:             user.balance,
+          createdAt:           user.created_at,
+          subscriptionActive:  false,
+          subscriptionExpires: null,
+        },
+      });
+    }
+
+    // ===== 3. LOGOUT =====
+    if (action === 'logout') {
+      const session = await getSessionUser(req);
+      if (session) {
+        // token — TEXT, без ::uuid
+        await sql`DELETE FROM sessions WHERE token = ${session.token}`;
+      }
+      // Инвалидируем cookie
+      res.setHeader('Set-Cookie',
+        'kbpost_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0'
+      );
+      return res.status(200).json({ ok: true });
+    }
+
+    // ===== 4. CREATE TOKEN (вызывается ботом) =====
+    if (action === 'createToken') {
+      const secret = req.headers['x-bot-secret'];
+      if (!secret || secret !== process.env.BOT_SECRET) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+      const { actionType, data } = req.body;
+      if (!actionType || !data) {
+        return res.status(400).json({ error: 'actionType и data обязательны' });
+      }
+      // Генерируем TEXT токен явно, без gen_random_uuid()
+      const token = generateId();
+      await sql`
+        INSERT INTO pending_actions (token, action_type, data)
+        VALUES (${token}, ${actionType}, ${JSON.stringify(data)}::jsonb)
+      `;
+      return res.status(201).json({ token });
+    }
+
+    // ===== 5. CHECK TOKEN =====
+    if (action === 'checkToken' && req.method === 'POST') {
+      const { token } = req.body;
+      if (!token) return res.status(400).json({ error: 'token обязателен' });
+
+      // token — TEXT, без ::uuid
+      const rows = await sql`
+        SELECT token, action_type, data
+        FROM pending_actions
+        WHERE token = ${token}
+          AND expires_at > NOW()
+        LIMIT 1
+      `;
+      if (!rows.length) {
+        return res.status(404).json({ error: 'Токен истёк или не найден' });
+      }
+      return res.status(200).json({
+        actionType: rows[0].action_type,
+        data:       rows[0].data,
+      });
+    }
+
+    // ===== 6. CONFIRM (применить токен — привязка TG или сброс пароля) =====
+    if (action === 'confirm' && req.method === 'POST') {
+      const { token, password } = req.body;
+      if (!token) return res.status(400).json({ error: 'token обязателен' });
+
+      // token — TEXT, без ::uuid
+      const rows = await sql`
+        SELECT token, action_type, data
+        FROM pending_actions
+        WHERE token = ${token}
+          AND expires_at > NOW()
+        LIMIT 1
+      `;
+      if (!rows.length) {
+        return res.status(404).json({ error: 'Токен не найден или истёк' });
+      }
+
+      const { action_type, data } = rows[0];
+
+      if (action_type === 'link_tg') {
+        const tgNorm = data.tgUsername ? data.tgUsername.replace(/^@/, '').toLowerCase() : null;
+        if (tgNorm) {
+          await sql`
+            UPDATE users SET telegram_id = ${tgNorm}
+            WHERE LOWER(username) = LOWER(${data.siteUsername})
+          `;
+        }
+      } else if (action_type === 'reset_password') {
+        if (!password || password.length < 4) {
           return res.status(400).json({ error: 'Пароль должен быть от 4 символов' });
-        const rows = await sql`SELECT password_hash FROM users WHERE id = ${session.userId}`;
-        if (!rows.length) return res.status(404).json({ error: 'Пользователь не найден' });
-        const valid = await bcrypt.compare(oldPassword, rows[0].password_hash);
-        if (!valid) return res.status(401).json({ error: 'Неверный текущий пароль' });
-        const newHash = await bcrypt.hash(newPassword, 10);
-        await sql`UPDATE users SET password_hash = ${newHash} WHERE id = ${session.userId}`;
-        return res.status(200).json({ ok: true });
-      }
-
-      // Обновление счёта
-      if (action === 'updateAccount') {
-        const { account } = req.body;
-        if (!account?.trim()) return res.status(400).json({ error: 'Укажите счёт' });
-        await sql`UPDATE users SET account = ${account.trim()} WHERE id = ${session.userId}`;
-        return res.status(200).json({ ok: true });
-      }
-
-      // Запрос на покупку подписки
-      if (action === 'requestSubscription') {
-        const existing = await sql`
-          SELECT id FROM subscription_requests
-          WHERE user_id = ${session.userId} AND status = 'pending'
-          LIMIT 1
-        `;
-        if (existing.length) {
-          return res.status(409).json({ error: 'Запрос уже отправлен, ожидайте подтверждения' });
         }
-        const uRows = await sql`
-          SELECT subscription_active, subscription_expires FROM users WHERE id = ${session.userId}
+        const hash = await bcrypt.hash(password, 10);
+        await sql`
+          UPDATE users SET password_hash = ${hash}
+          WHERE LOWER(username) = LOWER(${data.siteUsername})
         `;
-        const u = uRows[0];
-        if (u.subscription_active && u.subscription_expires && new Date(u.subscription_expires) > new Date()) {
-          return res.status(400).json({ error: 'Подписка уже активна' });
+        // Инвалидируем все сессии пользователя после сброса пароля
+        const userRows = await sql`
+          SELECT id FROM users WHERE LOWER(username) = LOWER(${data.siteUsername}) LIMIT 1
+        `;
+        if (userRows.length) {
+          await sql`DELETE FROM sessions WHERE user_id = ${userRows[0].id}`;
         }
-        // Здесь для ID запроса нужно сгенерировать строку, если база сама не делает DEFAULT
-        const requestId = Math.random().toString(36).substring(2, 10); 
-        await sql`
-          INSERT INTO subscription_requests (id, user_id, username, amount)
-          VALUES (${requestId}, ${session.userId}, ${session.username}, 5)
-        `;
-        return res.status(201).json({ ok: true });
       }
 
-      // Подтверждение подписки (только admin)
-      if (action === 'confirmSubscription') {
-        if (!session.isAdmin) return res.status(403).json({ error: 'Нет доступа' });
-        const { requestId } = req.body;
-        if (!requestId) return res.status(400).json({ error: 'requestId обязателен' });
+      // Удаляем использованный токен
+      await sql`DELETE FROM pending_actions WHERE token = ${token}`;
 
-        const reqRows = await sql`
-          SELECT * FROM subscription_requests WHERE id = ${requestId} LIMIT 1
-        `;
-        if (!reqRows.length) return res.status(404).json({ error: 'Запрос не найден' });
-        if (reqRows[0].status !== 'pending') return res.status(400).json({ error: 'Запрос уже обработан' });
-
-        await sql`
-          UPDATE users
-          SET subscription_active  = TRUE,
-              subscription_expires = NOW() + INTERVAL '30 days'
-          WHERE id = ${reqRows[0].user_id}
-        `;
-        await sql`
-          UPDATE subscription_requests SET status = 'confirmed' WHERE id = ${requestId}
-        `;
-        return res.status(200).json({ ok: true });
-      }
-
-      // Отклонение подписки (только admin)
-      if (action === 'rejectSubscription') {
-        if (!session.isAdmin) return res.status(403).json({ error: 'Нет доступа' });
-        const { requestId } = req.body;
-        await sql`
-          UPDATE subscription_requests SET status = 'rejected' WHERE id = ${requestId} AND status = 'pending'
-        `;
-        return res.status(200).json({ ok: true });
-      }
-
-      // Управление пользователями (admin)
-      if (['makeAdmin', 'removeAdmin', 'delete', 'updateBalance'].includes(action)) {
-        if (!session.isAdmin) return res.status(403).json({ error: 'Нет доступа' });
-        const { userId, balance } = req.body;
-        if (!userId) return res.status(400).json({ error: 'userId обязателен' });
-
-        if (action === 'makeAdmin')
-          await sql`UPDATE users SET is_admin = TRUE WHERE id = ${userId}`;
-        if (action === 'removeAdmin')
-          await sql`UPDATE users SET is_admin = FALSE WHERE id = ${userId}`;
-        if (action === 'updateBalance')
-          await sql`UPDATE users SET balance = ${parseInt(balance, 10)} WHERE id = ${userId}`;
-        if (action === 'delete') {
-          await sql`DELETE FROM sessions WHERE user_id = ${userId}`;
-          await sql`DELETE FROM users WHERE id = ${userId}`;
-        }
-        return res.status(200).json({ ok: true });
-      }
+      return res.status(200).json({ ok: true, action: action_type });
     }
 
-    return res.status(405).json({ error: 'Метод не поддерживается' });
+    return res.status(405).json({ error: 'Неизвестное действие' });
+
   } catch (err) {
-    console.error('user handler error:', err);
+    console.error('auth handler error:', err.message);
     return res.status(500).json({ error: 'Ошибка сервера' });
   }
 };

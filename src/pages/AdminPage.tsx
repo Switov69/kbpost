@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth, useToast, sendNotification } from '../context';
 import {
-  apiGetAllUsers, apiGetAllParcels, apiGetParcel, apiManageUser,
+  apiGetAllUsers, apiGetParcels, apiManageUser,
   apiUpdateParcel, apiDeleteParcel,
   apiGetBranches, apiManageBranch,
   apiGetSubscriptionRequests, apiConfirmSubscription, apiRejectSubscription,
@@ -48,9 +48,6 @@ export default function AdminPage() {
   const [allBranches, setAllBranches] = useState<BranchDTO[]>([]);
   const [subRequests, setSubRequests] = useState<SubscriptionRequestDTO[]>([]);
 
-  // Кэш полных данных посылок (со statusHistory) — загружаем лениво при раскрытии
-  const [parcelDetailCache, setParcelDetailCache] = useState<Record<string, ParcelDTO>>({});
-
   const [ttnSearch, setTtnSearch] = useState('');
   const [expandedParcel, setExpandedParcel] = useState<string | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
@@ -67,16 +64,13 @@ export default function AdminPage() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      // apiGetAllParcels — загружает все посылки страницами, без status_history
       const [users, parcels, branches, subs] = await Promise.all([
-        apiGetAllUsers(), apiGetAllParcels(), apiGetBranches(), apiGetSubscriptionRequests(),
+        apiGetAllUsers(), apiGetParcels(), apiGetBranches(), apiGetSubscriptionRequests(),
       ]);
       setAllUsers(users);
       setAllParcels(parcels);
       setAllBranches(branches);
       setSubRequests(subs);
-      // Сбрасываем кэш деталей при обновлении
-      setParcelDetailCache({});
     } catch (err: any) {
       addToast(err.message || 'Ошибка загрузки', 'error');
     } finally {
@@ -85,20 +79,6 @@ export default function AdminPage() {
   }, [addToast]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
-
-  // Раскрытие карточки посылки — подгружаем statusHistory если ещё не загружали
-  const handleExpandParcel = useCallback(async (parcelId: string | null) => {
-    setExpandedParcel(parcelId);
-    if (!parcelId || parcelDetailCache[parcelId]) return;
-    try {
-      const detail = await apiGetParcel(parcelId);
-      setParcelDetailCache(prev => ({ ...prev, [parcelId]: detail }));
-      // Обновляем запись в основном списке полным объектом
-      setAllParcels(prev => prev.map(p => p.id === parcelId ? { ...p, statusHistory: detail.statusHistory } : p));
-    } catch {
-      // Не критично — просто история не покажется
-    }
-  }, [parcelDetailCache]);
 
   if (!user?.isAdmin) {
     return (
@@ -114,7 +94,7 @@ export default function AdminPage() {
       if (!ttnSearch.trim()) return true;
       const q = ttnSearch.toLowerCase();
       return p.ttn.toLowerCase().includes(q) || p.senderUsername.toLowerCase().includes(q) ||
-             p.receiverUsername.toLowerCase().includes(q) || (p.description ?? '').toLowerCase().includes(q);
+             p.receiverUsername.toLowerCase().includes(q) || p.description.toLowerCase().includes(q);
     })
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 
@@ -132,8 +112,6 @@ export default function AdminPage() {
     try {
       const updated = await apiUpdateParcel(parcelId, 'updateStatus', { newStatus });
       setAllParcels(prev => prev.map(p => p.id === updated.id ? updated : p));
-      // Обновляем кэш деталей
-      setParcelDetailCache(prev => updated.id in prev ? { ...prev, [updated.id]: updated } : prev);
       sendNotification(`Статус посылки изменён: ${STATUS_LABELS[newStatus]}`);
       addToast(`Статус обновлён: ${STATUS_LABELS[newStatus]}`, 'success');
     } catch (err: any) { addToast(err.message || 'Ошибка', 'error'); }
@@ -143,7 +121,6 @@ export default function AdminPage() {
     try {
       await apiDeleteParcel(parcelId);
       setAllParcels(prev => prev.filter(p => p.id !== parcelId));
-      setParcelDetailCache(prev => { const c = { ...prev }; delete c[parcelId]; return c; });
       addToast('Посылка удалена', 'success');
       setDeleteConfirm(null);
       setExpandedParcel(null);
@@ -154,7 +131,6 @@ export default function AdminPage() {
     try {
       const updated = await apiUpdateParcel(parcelId, 'confirmPayment');
       setAllParcels(prev => prev.map(p => p.id === updated.id ? updated : p));
-      setParcelDetailCache(prev => updated.id in prev ? { ...prev, [updated.id]: updated } : prev);
       sendNotification('Оплата посылки подтверждена');
       addToast('Оплата подтверждена ✅', 'success');
     } catch (err: any) { addToast(err.message || 'Ошибка', 'error'); }
@@ -266,8 +242,6 @@ export default function AdminPage() {
                 {filteredParcels.map(parcel => {
                   const isExpanded = expandedParcel === parcel.id;
                   const isDeleting = deleteConfirm === parcel.id;
-                  // Берём полные данные из кэша если есть, иначе из списка
-                  const parcelFull = parcelDetailCache[parcel.id] ?? parcel;
                   const getNextStatus = (): number | null => {
                     const s = parcel.status;
                     if (s === 2) return 3; if (s === 3) return 4; if (s === 4) return 5;
@@ -277,7 +251,7 @@ export default function AdminPage() {
                   const nextStatus = getNextStatus();
                   return (
                     <div key={parcel.id} className="glass-card-static overflow-hidden">
-                      <button onClick={() => handleExpandParcel(isExpanded ? null : parcel.id)} className="w-full p-4 text-left flex items-center gap-3">
+                      <button onClick={() => setExpandedParcel(isExpanded ? null : parcel.id)} className="w-full p-4 text-left flex items-center gap-3">
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 mb-1"><span className="text-xs font-mono font-semibold text-red-400">{parcel.ttn}</span></div>
                           <p className="text-sm text-dark-200 truncate">{parcel.description}</p>
@@ -308,9 +282,7 @@ export default function AdminPage() {
                               )}
                               <div className="text-xs space-y-1">
                                 <p className="text-dark-500 font-semibold">Маршрут:</p>
-                                {parcelFull.statusHistory.length === 0 ? (
-                                  <p className="text-dark-500 italic">Загрузка истории...</p>
-                                ) : parcelFull.statusHistory.map((entry, i) => (
+                                {parcel.statusHistory.map((entry, i) => (
                                   <div key={i} className="flex items-center gap-2">
                                     <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{ backgroundColor: STATUS_COLORS[entry.status] }} />
                                     <span className="text-dark-300">{entry.label}</span>
@@ -431,6 +403,8 @@ export default function AdminPage() {
             {/* PAYMENTS */}
             {activeTab === 'payments' && (
               <div className="space-y-4">
+
+                {/* --- Наложенный платёж посылок --- */}
                 <div className="space-y-3">
                   <h3 className="text-sm font-bold text-dark-300 flex items-center gap-2">
                     <Package size={14} className="text-orange-400" />
@@ -458,6 +432,7 @@ export default function AdminPage() {
                   ))}
                 </div>
 
+                {/* --- Запросы на подписку --- */}
                 <div className="space-y-3">
                   <h3 className="text-sm font-bold text-dark-300 flex items-center gap-2">
                     <Star size={14} className="text-yellow-400" />
@@ -511,6 +486,7 @@ export default function AdminPage() {
                     </div>
                   ))}
                 </div>
+
               </div>
             )}
 

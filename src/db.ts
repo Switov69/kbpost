@@ -1,16 +1,19 @@
 /**
  * db.ts — API-обёртки, совместимые с существующим кодом AdminPage, CreatePage и т.д.
  * Все функции теперь работают через Vercel API, не через localStorage.
+ *
+ * Синхронные функции заменены на async там, где это нужно.
+ * Для обратной совместимости некоторые функции возвращают данные из локального кеша.
  */
 
 import {
-  apiGetParcels, apiGetParcel, apiGetAllUsers, apiCreateParcel,
+  apiGetParcels, apiGetAllUsers, apiCreateParcel,
   apiUpdateParcel, apiDeleteParcel,
   apiGetBranches, apiManageBranch,
   apiManageUser,
   type ParcelDTO, type UserDTO, type BranchDTO,
 } from './api';
-import { User, Parcel, Branch } from './types';
+import { User, Parcel, Branch, STATUS_LABELS } from './types';
 
 // ===== УТИЛИТЫ =====
 
@@ -29,28 +32,28 @@ function userDtoToModel(dto: UserDTO): User {
 
 function parcelDtoToModel(dto: ParcelDTO): Parcel {
   return {
-    id:                      dto.id,
-    ttn:                     dto.ttn,
-    description:             dto.description,
-    senderId:                dto.senderId,
-    receiverId:              dto.receiverId,
-    senderUsername:          dto.senderUsername,
-    receiverUsername:        dto.receiverUsername,
-    status:                  dto.status,
-    statusHistory:           dto.statusHistory,
-    fromBranchId:            dto.fromBranchId,
-    toBranchId:              dto.toBranchId,
-    toCoordinates:           dto.toCoordinates,
-    cashOnDelivery:          dto.cashOnDelivery,
-    cashOnDeliveryAmount:    dto.cashOnDeliveryAmount,
-    cashOnDeliveryPaid:      dto.cashOnDeliveryPaid,
-    cashOnDeliveryConfirmed: dto.cashOnDeliveryConfirmed,
-    createdAt:               dto.createdAt,
-    updatedAt:               dto.updatedAt,
+    id:                       dto.id,
+    ttn:                      dto.ttn,
+    description:              dto.description,
+    senderId:                 dto.senderId,
+    receiverId:               dto.receiverId,
+    senderUsername:           dto.senderUsername,
+    receiverUsername:         dto.receiverUsername,
+    status:                   dto.status,
+    statusHistory:            dto.statusHistory,
+    fromBranchId:             dto.fromBranchId,
+    toBranchId:               dto.toBranchId,
+    toCoordinates:            dto.toCoordinates,
+    cashOnDelivery:           dto.cashOnDelivery,
+    cashOnDeliveryAmount:     dto.cashOnDeliveryAmount,
+    cashOnDeliveryPaid:       dto.cashOnDeliveryPaid,
+    cashOnDeliveryConfirmed:  dto.cashOnDeliveryConfirmed,
+    createdAt:                dto.createdAt,
+    updatedAt:                dto.updatedAt,
   };
 }
 
-// ===== NO-OP initDB (совместимость) =====
+// ===== NO-OP initDB (больше не нужен, совместимость) =====
 export function initDB(): void {}
 
 // ===== BRANCHES =====
@@ -122,31 +125,16 @@ export async function updateUserBalance(userId: string, balance: number): Promis
 
 // ===== PARCELS =====
 
-/**
- * Получить список посылок текущего пользователя (без status_history).
- * Используется в HomePage, ProfilePage — не нужен status_history.
- */
 export async function getParcels(): Promise<Parcel[]> {
-  const dtos = await apiGetParcels(20, 0);
+  const dtos = await apiGetParcels();
   return dtos.map(parcelDtoToModel);
 }
 
-/**
- * Получить одну посылку по id (со status_history).
- * Используется в ParcelDetailPage, RoutePage — прямой запрос к API.
- */
 export async function getParcelById(id: string): Promise<Parcel | undefined> {
-  try {
-    const dto = await apiGetParcel(id);
-    return parcelDtoToModel(dto);
-  } catch {
-    return undefined;
-  }
+  const parcels = await getParcels();
+  return parcels.find(p => p.id === id);
 }
 
-/**
- * Поиск посылки по ТТН — загружает список и ищет.
- */
 export async function getParcelByTTN(ttn: string): Promise<Parcel | undefined> {
   const parcels = await getParcels();
   return parcels.find(p => p.ttn.toLowerCase() === ttn.toLowerCase());
@@ -222,7 +210,7 @@ export async function getUserStats(userId: string): Promise<{ sent: number; rece
   };
 }
 
-// ===== TTN генерация — на сервере, здесь заглушка =====
+// ===== TTN генерация — теперь на сервере, здесь заглушка =====
 export function generateTTN(): string {
-  return '#????';
+  return '#????'; // генерируется сервером при создании посылки
 }
