@@ -33,7 +33,6 @@ module.exports = async function handler(req, res) {
         return res.status(400).json({ error: 'Заполните все поля' });
       }
 
-      // Поиск пользователя по никнейму (TEXT сравнение, без ::uuid)
       const rows = await sql`
         SELECT id, username, password_hash, is_admin, telegram_id,
                citizenship, account, balance, created_at,
@@ -53,17 +52,12 @@ module.exports = async function handler(req, res) {
         return res.status(401).json({ error: 'Неверный никнейм или пароль' });
       }
 
-      // Генерируем новый TEXT-токен сессии
       const token = generateId();
-
-      // Вставляем сессию. user_id — TEXT, token — TEXT, без ::uuid
       await sql`
         INSERT INTO sessions (token, user_id)
         VALUES (${token}, ${user.id})
       `;
 
-      // Принудительно перезаписываем cookie при каждом успешном входе,
-      // чтобы вытеснить старые невалидные токены из браузера.
       res.setHeader('Set-Cookie',
         `kbpost_session=${token}; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=${30 * 24 * 3600}`
       );
@@ -99,7 +93,6 @@ module.exports = async function handler(req, res) {
         return res.status(400).json({ error: 'Заполните все поля (пароль мин. 4 символа)' });
       }
 
-      // Проверяем уникальность никнейма
       const existing = await sql`
         SELECT id FROM users WHERE LOWER(username) = LOWER(${username.trim()}) LIMIT 1
       `;
@@ -107,7 +100,6 @@ module.exports = async function handler(req, res) {
         return res.status(409).json({ error: 'Пользователь с таким никнеймом уже существует' });
       }
 
-      // Нормализуем telegram_id (без @, нижний регистр)
       const tgNorm = telegramUsername.replace(/^@/, '').toLowerCase();
       const tgExisting = await sql`
         SELECT id FROM users WHERE telegram_id = ${tgNorm} LIMIT 1
@@ -117,22 +109,19 @@ module.exports = async function handler(req, res) {
       }
 
       const passwordHash = await bcrypt.hash(password, 10);
-      const newUserId = generateUserId(); // TEXT ID
+      const newUserId = generateUserId();
 
-      // Вставляем пользователя с явным TEXT id, без gen_random_uuid()
       await sql`
         INSERT INTO users (id, username, password_hash, telegram_id, citizenship, account, is_admin)
         VALUES (${newUserId}, ${username.trim()}, ${passwordHash}, ${tgNorm}, ${citizenship.trim()}, ${account.trim()}, FALSE)
       `;
 
-      // Получаем созданного пользователя
       const newUserRows = await sql`
         SELECT id, username, is_admin, telegram_id, citizenship, account, balance, created_at
         FROM users WHERE id = ${newUserId} LIMIT 1
       `;
       const user = newUserRows[0];
 
-      // Создаём сессию
       const token = generateId();
       await sql`
         INSERT INTO sessions (token, user_id)
@@ -165,10 +154,8 @@ module.exports = async function handler(req, res) {
     if (action === 'logout') {
       const session = await getSessionUser(req);
       if (session) {
-        // token — TEXT, без ::uuid
         await sql`DELETE FROM sessions WHERE token = ${session.token}`;
       }
-      // Инвалидируем cookie
       res.setHeader('Set-Cookie',
         'kbpost_session=; Path=/; HttpOnly; SameSite=None; Secure; Max-Age=0'
       );
@@ -185,7 +172,7 @@ module.exports = async function handler(req, res) {
       if (!actionType || !data) {
         return res.status(400).json({ error: 'actionType и data обязательны' });
       }
-      // Генерируем TEXT токен явно, без gen_random_uuid()
+      // Генерируем UUID явно — поле token не имеет DEFAULT в БД
       const token = generateId();
       await sql`
         INSERT INTO pending_actions (token, action_type, data)
@@ -199,10 +186,8 @@ module.exports = async function handler(req, res) {
       const { token } = req.body;
       if (!token) return res.status(400).json({ error: 'token обязателен' });
 
-      // Логируем токен для отладки в Vercel
       console.log('checkToken — ищем токен:', token);
 
-      // token — TEXT, без ::uuid
       const rows = await sql`
         SELECT token, action_type, data, expires_at
         FROM pending_actions
@@ -211,20 +196,20 @@ module.exports = async function handler(req, res) {
         LIMIT 1
       `;
 
-      console.log('checkToken — результат БД:', rows.length ? `найден (expires_at: ${rows[0].expires_at})` : 'не найден');
-
       if (!rows.length) {
-        // Дополнительная диагностика: ищем токен без проверки времени
+        // Диагностика: токен есть, но просрочен?
         const anyRows = await sql`
           SELECT token, expires_at FROM pending_actions WHERE token = ${token} LIMIT 1
         `;
         if (anyRows.length) {
-          console.log('checkToken — токен существует, но просрочен. expires_at:', anyRows[0].expires_at, ' NOW:', new Date().toISOString());
+          console.log('checkToken — токен просрочен. expires_at:', anyRows[0].expires_at, '| NOW:', new Date().toISOString());
           return res.status(404).json({ error: 'Токен истёк' });
         }
         console.log('checkToken — токен отсутствует в таблице pending_actions');
         return res.status(404).json({ error: 'Токен не найден' });
       }
+
+      console.log('checkToken — найден. action_type:', rows[0].action_type, '| expires_at:', rows[0].expires_at);
 
       return res.status(200).json({
         actionType: rows[0].action_type,
@@ -232,15 +217,13 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ===== 6. CONFIRM (применить токен — привязка TG или сброс пароля) =====
+    // ===== 6. CONFIRM (применить токен) =====
     if (action === 'confirm' && req.method === 'POST') {
       const { token, password } = req.body;
       if (!token) return res.status(400).json({ error: 'token обязателен' });
 
-      // Логируем токен для отладки в Vercel
       console.log('confirm — ищем токен:', token);
 
-      // token — TEXT, без ::uuid
       const rows = await sql`
         SELECT token, action_type, data, expires_at
         FROM pending_actions
@@ -249,31 +232,49 @@ module.exports = async function handler(req, res) {
         LIMIT 1
       `;
 
-      console.log('confirm — результат БД:', rows.length ? `найден (action: ${rows[0].action_type})` : 'не найден');
-
       if (!rows.length) {
-        // Дополнительная диагностика: ищем без проверки времени
         const anyRows = await sql`
           SELECT token, expires_at FROM pending_actions WHERE token = ${token} LIMIT 1
         `;
         if (anyRows.length) {
-          console.log('confirm — токен существует, но просрочен. expires_at:', anyRows[0].expires_at, ' NOW:', new Date().toISOString());
+          console.log('confirm — токен просрочен. expires_at:', anyRows[0].expires_at, '| NOW:', new Date().toISOString());
           return res.status(404).json({ error: 'Токен истёк' });
         }
         console.log('confirm — токен отсутствует в таблице pending_actions');
         return res.status(404).json({ error: 'Токен не найден или истёк' });
       }
 
+      console.log('confirm — найден. action_type:', rows[0].action_type);
+
       const { action_type, data } = rows[0];
 
       if (action_type === 'link_tg') {
         const tgNorm = data.tgUsername ? data.tgUsername.replace(/^@/, '').toLowerCase() : null;
-        if (tgNorm) {
-          await sql`
-            UPDATE users SET telegram_id = ${tgNorm}
-            WHERE LOWER(username) = LOWER(${data.siteUsername})
-          `;
+        if (!tgNorm) {
+          await sql`DELETE FROM pending_actions WHERE token = ${token}`;
+          return res.status(400).json({ error: 'Отсутствует tgUsername в данных токена' });
         }
+
+        // Проверяем, не занят ли этот Telegram другим пользователем
+        const conflictRows = await sql`
+          SELECT username FROM users
+          WHERE telegram_id = ${tgNorm}
+            AND LOWER(username) != LOWER(${data.siteUsername})
+          LIMIT 1
+        `;
+        if (conflictRows.length) {
+          await sql`DELETE FROM pending_actions WHERE token = ${token}`;
+          return res.status(409).json({
+            error: `Telegram уже привязан к аккаунту «${conflictRows[0].username}»`,
+          });
+        }
+
+        await sql`
+          UPDATE users SET telegram_id = ${tgNorm}
+          WHERE LOWER(username) = LOWER(${data.siteUsername})
+        `;
+        console.log('confirm link_tg — обновлён telegram_id:', tgNorm, 'для пользователя:', data.siteUsername);
+
       } else if (action_type === 'reset_password') {
         if (!password || password.length < 4) {
           return res.status(400).json({ error: 'Пароль должен быть от 4 символов' });
@@ -290,9 +291,10 @@ module.exports = async function handler(req, res) {
         if (userRows.length) {
           await sql`DELETE FROM sessions WHERE user_id = ${userRows[0].id}`;
         }
+        console.log('confirm reset_password — пароль сброшен для:', data.siteUsername);
       }
 
-      // Удаляем использованный токен
+      // Удаляем использованный токен, чтобы не засорять базу
       await sql`DELETE FROM pending_actions WHERE token = ${token}`;
 
       return res.status(200).json({ ok: true, action: action_type });
