@@ -1,4 +1,3 @@
-import { useEffect } from 'react';
 import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppProvider, useAuth } from './context';
 import Layout from './components/Layout';
@@ -89,16 +88,7 @@ function AppRoutes() {
 }
 
 export default function App() {
-  // Инициализация Telegram WebApp
-  useEffect(() => {
-    const tg = (window as any).Telegram?.WebApp;
-    
-    if (tg) {
-      tg.ready();
-      tg.expand();
-    }
-  }, []);
-
+  // Telegram WebApp API удалён — сайт работает в обычном браузере
   return (
     <HashRouter>
       <AppProvider>

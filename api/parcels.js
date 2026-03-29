@@ -20,7 +20,6 @@ const STATUS_LABELS = {
   8: 'Доставлена на координаты',
 };
 
-// Генерирует уникальный ТТН вида #0001–#9999
 async function generateTTN(sql) {
   for (let attempt = 0; attempt < 20; attempt++) {
     const num = Math.floor(1 + Math.random() * 9999);
@@ -31,7 +30,6 @@ async function generateTTN(sql) {
   return `#${Date.now().toString(36).toUpperCase().slice(-4)}`;
 }
 
-// Маппинг строки БД → объект для фронтенда
 function mapParcel(p) {
   return {
     id:                      p.id,
@@ -55,7 +53,8 @@ function mapParcel(p) {
   };
 }
 
-// Уведомление всех админов в боте о новой посылке (fire-and-forget)
+// Уведомление всех админов в боте о новой посылке (fire-and-forget).
+// url-кнопка вместо web_app — Mini App упразднён.
 async function notifyAdminsNewParcel(sql, ttn, senderUsername, receiverUsername) {
   if (!BOT_TOKEN) return;
   try {
@@ -65,14 +64,19 @@ async function notifyAdminsNewParcel(sql, ttn, senderUsername, receiverUsername)
       JOIN users u ON u.telegram_id = bs.tg_username
       WHERE u.is_admin = TRUE
     `;
-    const msgText = `📦 <b>Новая посылка создана!</b>\n\nТТН: <code>${ttn}</code>\nОтправитель: <b>${senderUsername}</b>\nПолучатель: <b>${receiverUsername}</b>`;
+    const msgText =
+      `📦 <b>Новая посылка создана!</b>\n\n` +
+      `ТТН: <code>${ttn}</code>\n` +
+      `Отправитель: <b>${senderUsername}</b>\n` +
+      `Получатель: <b>${receiverUsername}</b>`;
+
     for (const row of adminSessions) {
       const body = JSON.stringify({
         chat_id: row.chat_id,
         text: msgText,
         parse_mode: 'HTML',
         reply_markup: {
-          inline_keyboard: [[{ text: '📦 Открыть kbpost', web_app: { url: WEBAPP_URL } }]],
+          inline_keyboard: [[{ text: '📦 Открыть kbpost', url: WEBAPP_URL }]],
         },
       });
       await new Promise((resolve) => {
@@ -108,37 +112,36 @@ module.exports = async function handler(req, res) {
 
   try {
     // ===== GET — список посылок =====
+    // Доступно ЛЮБОМУ залогиненному пользователю (лишняя проверка is_admin убрана).
     if (req.method === 'GET') {
-      // session.userId — TEXT, без ::uuid
       const parcels = session.isAdmin
         ? await sql`SELECT * FROM parcels ORDER BY created_at DESC`
         : await sql`
             SELECT * FROM parcels
-            WHERE sender_id = ${session.userId}
-               OR receiver_id = ${session.userId}
+            WHERE sender_id = ${session.userId} OR receiver_id = ${session.userId}
             ORDER BY created_at DESC
           `;
       return res.status(200).json(parcels.map(mapParcel));
     }
 
-    // ===== POST — создание и изменение =====
+    // ===== POST =====
     if (req.method === 'POST') {
       const { action, parcelId } = req.body || {};
 
       // --- Создание посылки ---
+      // Доступно ЛЮБОМУ залогиненному пользователю (лишняя проверка is_admin убрана).
       if (action === 'create') {
         const {
           description, receiverUsername, fromBranchId,
           toBranchId, toCoordinates, cashOnDelivery, cashOnDeliveryAmount,
         } = req.body;
 
-        if (!description?.trim())     return res.status(400).json({ error: 'Укажите описание' });
+        if (!description?.trim())      return res.status(400).json({ error: 'Укажите описание' });
         if (!receiverUsername?.trim()) return res.status(400).json({ error: 'Укажите получателя' });
         if (!fromBranchId?.trim())     return res.status(400).json({ error: 'Укажите отделение' });
 
         const ttn = await generateTTN(sql);
 
-        // Ищем получателя — сравнение TEXT, без ::uuid
         const userRows = await sql`
           SELECT id, username FROM users
           WHERE LOWER(username) = LOWER(${receiverUsername.trim()})
@@ -155,11 +158,8 @@ module.exports = async function handler(req, res) {
         const now = new Date().toISOString();
         const statusHistory = JSON.stringify([{ status: 1, label: STATUS_LABELS[1], timestamp: now }]);
         const amount = cashOnDelivery ? (parseInt(cashOnDeliveryAmount, 10) || 0) : 0;
+        const newParcelId = crypto.randomUUID();
 
-        // Генерируем TEXT id для посылки явно (нет DEFAULT gen_random_uuid())
-        const parcelId = crypto.randomUUID();
-
-        // sender_id и receiver_id — TEXT, без ::uuid
         await sql`
           INSERT INTO parcels (
             id, ttn, sender_id, receiver_id,
@@ -168,7 +168,7 @@ module.exports = async function handler(req, res) {
             from_branch_id, to_branch_id, to_coordinates,
             cash_on_delivery, cash_on_delivery_amount
           ) VALUES (
-            ${parcelId}, ${ttn}, ${session.userId}, ${receiver.id},
+            ${newParcelId}, ${ttn}, ${session.userId}, ${receiver.id},
             ${session.username}, ${receiver.username},
             1, ${statusHistory}::jsonb, ${description.trim()},
             ${fromBranchId}, ${toBranchId || null}, ${toCoordinates || null},
@@ -176,10 +176,9 @@ module.exports = async function handler(req, res) {
           )
         `;
 
-        const newRows = await sql`SELECT * FROM parcels WHERE id = ${parcelId} LIMIT 1`;
+        const newRows = await sql`SELECT * FROM parcels WHERE id = ${newParcelId} LIMIT 1`;
         const created = mapParcel(newRows[0]);
 
-        // Уведомляем админов (не блокируем ответ)
         notifyAdminsNewParcel(sql, created.ttn, created.senderUsername, created.receiverUsername)
           .catch(() => {});
 
@@ -192,7 +191,6 @@ module.exports = async function handler(req, res) {
         const ns = parseInt(req.body.newStatus, 10);
         if (!ns || !STATUS_LABELS[ns]) return res.status(400).json({ error: 'Неверный статус' });
 
-        // parcelId — TEXT, без ::uuid
         const rows = await sql`SELECT * FROM parcels WHERE id = ${parcelId} LIMIT 1`;
         if (!rows.length) return res.status(404).json({ error: 'Посылка не найдена' });
         const parcel = rows[0];
@@ -223,13 +221,10 @@ module.exports = async function handler(req, res) {
         return res.status(200).json(mapParcel(updated[0]));
       }
 
-      // --- Пометить оплаченным (получатель нажал «Я оплатил») ---
+      // --- Пометить оплаченным ---
       if (action === 'markPaid') {
         if (!parcelId) return res.status(400).json({ error: 'parcelId обязателен' });
-        // parcelId — TEXT, без ::uuid
-        const rows = await sql`
-          SELECT receiver_id FROM parcels WHERE id = ${parcelId} LIMIT 1
-        `;
+        const rows = await sql`SELECT receiver_id FROM parcels WHERE id = ${parcelId} LIMIT 1`;
         if (!rows.length) return res.status(404).json({ error: 'Посылка не найдена' });
         if (rows[0].receiver_id !== session.userId && !session.isAdmin) {
           return res.status(403).json({ error: 'Нет доступа' });
@@ -245,7 +240,6 @@ module.exports = async function handler(req, res) {
       if (action === 'confirmPayment') {
         if (!session.isAdmin) return res.status(403).json({ error: 'Только администратор' });
         if (!parcelId) return res.status(400).json({ error: 'parcelId обязателен' });
-        // parcelId — TEXT, без ::uuid
         const updated = await sql`
           UPDATE parcels SET cash_on_delivery_confirmed = TRUE, updated_at = NOW()
           WHERE id = ${parcelId} RETURNING *
@@ -259,7 +253,6 @@ module.exports = async function handler(req, res) {
         if (!session.isAdmin) return res.status(403).json({ error: 'Только администратор' });
         if (!parcelId) return res.status(400).json({ error: 'parcelId обязателен' });
         const { description, fromBranchId, toBranchId, toCoordinates } = req.body;
-        // parcelId — TEXT, без ::uuid
         const updated = await sql`
           UPDATE parcels
           SET
@@ -278,12 +271,11 @@ module.exports = async function handler(req, res) {
       return res.status(400).json({ error: `Неизвестное действие: ${action}` });
     }
 
-    // ===== DELETE — удаление посылки (только admin) =====
+    // ===== DELETE (только admin) =====
     if (req.method === 'DELETE') {
       if (!session.isAdmin) return res.status(403).json({ error: 'Только для администраторов' });
       const { parcelId } = req.body || {};
       if (!parcelId) return res.status(400).json({ error: 'parcelId обязателен' });
-      // parcelId — TEXT, без ::uuid
       await sql`DELETE FROM parcels WHERE id = ${parcelId}`;
       return res.status(200).json({ success: true });
     }

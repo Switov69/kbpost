@@ -6,60 +6,34 @@ const crypto = require('crypto');
 const { getDB } = require('./_db');
 const { corsHeaders, getSessionUser } = require('./_auth');
 
-// ─────────────────────────────────────────────
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-// ─────────────────────────────────────────────
-
-// Генерирует UUID v4 как TEXT — используется для токенов сессий и pending_actions
 function generateId() {
   return crypto.randomUUID();
 }
 
-// Генерирует короткий TEXT-ID для записей users (16 символов hex)
 function generateUserId() {
   return crypto.randomBytes(8).toString('hex');
 }
 
 /**
- * Устанавливает cookie сессии единообразно во всех местах.
- *
- * Флаги:
- *   HttpOnly    — недоступна из JS, защита от XSS
- *   Secure      — только HTTPS
- *   SameSite=None — обязателен для cross-site контекста (Telegram Mini App = iframe)
- *   Partitioned — CHIPS (Cookies Having Independent Partitioned State).
- *                 Позволяет сторонним кукам работать внутри iframe в Chrome 114+
- *                 без блокировки third-party cookies. Старые браузеры игнорируют флаг.
- *   Max-Age=2592000 — 30 дней
- *
- * @param {object} res   — Express/Vercel response объект
- * @param {string} token — значение токена сессии (UUID TEXT)
+ * Cookie для обычного браузера (не iframe).
+ * SameSite=Lax — кука передаётся при переходе по ссылке из бота (GET-навигация),
+ * но не в cross-site POST/XHR. Безопаснее None, удобнее Strict.
  */
 function setSessionCookie(res, token) {
   res.setHeader(
     'Set-Cookie',
-    `kbpost_session=${token}; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=2592000`
+    `kbpost_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`
   );
 }
 
-/**
- * Стирает cookie сессии (устанавливает Max-Age=0).
- * @param {object} res
- */
 function clearSessionCookie(res) {
   res.setHeader(
     'Set-Cookie',
-    'kbpost_session=; Path=/; HttpOnly; SameSite=None; Secure; Partitioned; Max-Age=0'
+    'kbpost_session=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0'
   );
 }
 
-// ─────────────────────────────────────────────
-// ОБРАБОТЧИК
-// ─────────────────────────────────────────────
-
 module.exports = async function handler(req, res) {
-  // CORS — corsHeaders возвращает конкретный origin (не *) и Allow-Credentials: true,
-  // что обязательно для передачи кук в cross-origin запросах.
   const headers = corsHeaders(req.headers.origin);
   Object.entries(headers).forEach(([k, v]) => res.setHeader(k, v));
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -95,15 +69,9 @@ module.exports = async function handler(req, res) {
         return res.status(401).json({ error: 'Неверный никнейм или пароль' });
       }
 
-      // Создаём новую сессию. Если у пользователя уже есть старые сессии —
-      // не удаляем их (допускаем многоустройственность), просто добавляем новую.
       const token = generateId();
-      await sql`
-        INSERT INTO sessions (token, user_id)
-        VALUES (${token}, ${user.id})
-      `;
+      await sql`INSERT INTO sessions (token, user_id) VALUES (${token}, ${user.id})`;
 
-      // Устанавливаем куку через единую функцию
       setSessionCookie(res, token);
 
       const now = new Date();
@@ -142,7 +110,6 @@ module.exports = async function handler(req, res) {
         return res.status(400).json({ error: 'Заполните все поля (пароль мин. 4 символа)' });
       }
 
-      // Уникальность никнейма
       const existing = await sql`
         SELECT id FROM users WHERE LOWER(username) = LOWER(${username.trim()}) LIMIT 1
       `;
@@ -150,10 +117,8 @@ module.exports = async function handler(req, res) {
         return res.status(409).json({ error: 'Пользователь с таким никнеймом уже существует' });
       }
 
-      // Нормализуем telegram_id (без @, нижний регистр)
       const tgNorm = telegramUsername.replace(/^@/, '').toLowerCase();
 
-      // Уникальность telegram_id
       const tgExisting = await sql`
         SELECT id FROM users WHERE telegram_id = ${tgNorm} LIMIT 1
       `;
@@ -164,33 +129,22 @@ module.exports = async function handler(req, res) {
       const passwordHash = await bcrypt.hash(password, 10);
       const newUserId = generateUserId();
 
-      // Вставляем пользователя с явным TEXT id
       await sql`
         INSERT INTO users (id, username, password_hash, telegram_id, citizenship, account, is_admin)
         VALUES (
-          ${newUserId},
-          ${username.trim()},
-          ${passwordHash},
-          ${tgNorm},
-          ${citizenship.trim()},
-          ${account.trim()},
-          FALSE
+          ${newUserId}, ${username.trim()}, ${passwordHash},
+          ${tgNorm}, ${citizenship.trim()}, ${account.trim()}, FALSE
         )
       `;
 
-      // Получаем созданного пользователя обратно
       const newUserRows = await sql`
         SELECT id, username, is_admin, telegram_id, citizenship, account, balance, created_at
         FROM users WHERE id = ${newUserId} LIMIT 1
       `;
       const user = newUserRows[0];
 
-      // Создаём сессию
       const token = generateId();
-      await sql`
-        INSERT INTO sessions (token, user_id)
-        VALUES (${token}, ${user.id})
-      `;
+      await sql`INSERT INTO sessions (token, user_id) VALUES (${token}, ${user.id})`;
 
       setSessionCookie(res, token);
 
@@ -216,14 +170,13 @@ module.exports = async function handler(req, res) {
     if (action === 'logout') {
       const session = await getSessionUser(req);
       if (session) {
-        // Удаляем только текущую сессию (не все — не инвалидируем другие устройства)
         await sql`DELETE FROM sessions WHERE token = ${session.token}`;
       }
       clearSessionCookie(res);
       return res.status(200).json({ ok: true });
     }
 
-    // ===== 4. CREATE TOKEN (вызывается ботом через x-bot-secret) =====
+    // ===== 4. CREATE TOKEN (вызывается ботом) =====
     if (action === 'createToken') {
       const secret = req.headers['x-bot-secret'];
       if (!secret || secret !== process.env.BOT_SECRET) {
@@ -233,7 +186,6 @@ module.exports = async function handler(req, res) {
       if (!actionType || !data) {
         return res.status(400).json({ error: 'actionType и data обязательны' });
       }
-      // Генерируем UUID явно — поле token TEXT PRIMARY KEY не имеет DEFAULT в схеме
       const token = generateId();
       await sql`
         INSERT INTO pending_actions (token, action_type, data)
@@ -252,32 +204,23 @@ module.exports = async function handler(req, res) {
       const rows = await sql`
         SELECT token, action_type, data, expires_at
         FROM pending_actions
-        WHERE token = ${token}
-          AND expires_at > NOW()
+        WHERE token = ${token} AND expires_at > NOW()
         LIMIT 1
       `;
 
       if (!rows.length) {
-        // Диагностика: токен есть, но просрочен?
         const anyRows = await sql`
           SELECT token, expires_at FROM pending_actions WHERE token = ${token} LIMIT 1
         `;
         if (anyRows.length) {
-          console.log(
-            'checkToken — токен просрочен. expires_at:',
-            anyRows[0].expires_at,
-            '| NOW:', new Date().toISOString()
-          );
+          console.log('checkToken — просрочен. expires_at:', anyRows[0].expires_at, '| NOW:', new Date().toISOString());
           return res.status(404).json({ error: 'Токен истёк' });
         }
-        console.log('checkToken — токен отсутствует в таблице pending_actions');
+        console.log('checkToken — отсутствует в pending_actions');
         return res.status(404).json({ error: 'Токен не найден' });
       }
 
-      console.log(
-        'checkToken — найден. action_type:', rows[0].action_type,
-        '| expires_at:', rows[0].expires_at
-      );
+      console.log('checkToken — найден. action_type:', rows[0].action_type, '| expires_at:', rows[0].expires_at);
 
       return res.status(200).json({
         actionType: rows[0].action_type,
@@ -285,7 +228,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ===== 6. CONFIRM (применить токен — привязка TG или сброс пароля) =====
+    // ===== 6. CONFIRM =====
     if (action === 'confirm' && req.method === 'POST') {
       const { token, password } = req.body;
       if (!token) return res.status(400).json({ error: 'token обязателен' });
@@ -295,25 +238,19 @@ module.exports = async function handler(req, res) {
       const rows = await sql`
         SELECT token, action_type, data, expires_at
         FROM pending_actions
-        WHERE token = ${token}
-          AND expires_at > NOW()
+        WHERE token = ${token} AND expires_at > NOW()
         LIMIT 1
       `;
 
       if (!rows.length) {
-        // Диагностика
         const anyRows = await sql`
           SELECT token, expires_at FROM pending_actions WHERE token = ${token} LIMIT 1
         `;
         if (anyRows.length) {
-          console.log(
-            'confirm — токен просрочен. expires_at:',
-            anyRows[0].expires_at,
-            '| NOW:', new Date().toISOString()
-          );
+          console.log('confirm — просрочен. expires_at:', anyRows[0].expires_at, '| NOW:', new Date().toISOString());
           return res.status(404).json({ error: 'Токен истёк' });
         }
-        console.log('confirm — токен отсутствует в таблице pending_actions');
+        console.log('confirm — отсутствует в pending_actions');
         return res.status(404).json({ error: 'Токен не найден или истёк' });
       }
 
@@ -326,12 +263,10 @@ module.exports = async function handler(req, res) {
         const tgNorm = data.tgUsername ? data.tgUsername.replace(/^@/, '').toLowerCase() : null;
 
         if (!tgNorm) {
-          // Токен невалиден — удаляем и возвращаем ошибку
           await sql`DELETE FROM pending_actions WHERE token = ${token}`;
           return res.status(400).json({ error: 'Отсутствует tgUsername в данных токена' });
         }
 
-        // Проверяем: не занят ли этот Telegram другим пользователем
         const conflictRows = await sql`
           SELECT username FROM users
           WHERE telegram_id = ${tgNorm}
@@ -345,56 +280,40 @@ module.exports = async function handler(req, res) {
           });
         }
 
-        // Обновляем telegram_id пользователя
         await sql`
-          UPDATE users
-          SET telegram_id = ${tgNorm}
+          UPDATE users SET telegram_id = ${tgNorm}
           WHERE LOWER(username) = LOWER(${data.siteUsername})
         `;
         console.log('confirm link_tg — обновлён telegram_id:', tgNorm, 'для:', data.siteUsername);
 
-        // Получаем пользователя для создания сессии
         const userRows = await sql`
           SELECT id, username, is_admin, telegram_id, citizenship, account, balance, created_at,
                  subscription_active, subscription_expires
-          FROM users
-          WHERE LOWER(username) = LOWER(${data.siteUsername})
-          LIMIT 1
+          FROM users WHERE LOWER(username) = LOWER(${data.siteUsername}) LIMIT 1
         `;
 
-        // Удаляем использованный токен ДО ответа
         await sql`DELETE FROM pending_actions WHERE token = ${token}`;
 
         if (!userRows.length) {
-          // Привязка прошла, но пользователя не нашли для сессии — возвращаем ok без куки
-          console.log('confirm link_tg — пользователь не найден после UPDATE, сессия не создана');
+          console.log('confirm link_tg — пользователь не найден после UPDATE');
           return res.status(200).json({ ok: true, action: action_type });
         }
 
         const linkedUser = userRows[0];
 
-        // Создаём новую сессию — пользователь автоматически входит в аккаунт
-        // сразу после подтверждения привязки Telegram в боте
+        // Создаём сессию — пользователь авторизуется сразу в браузерной вкладке
         const sessionToken = generateId();
-        await sql`
-          INSERT INTO sessions (token, user_id)
-          VALUES (${sessionToken}, ${linkedUser.id})
-        `;
+        await sql`INSERT INTO sessions (token, user_id) VALUES (${sessionToken}, ${linkedUser.id})`;
 
-        // Устанавливаем куку — единая функция с Partitioned флагом
         setSessionCookie(res, sessionToken);
-
         console.log('confirm link_tg — создана сессия для:', linkedUser.username);
 
         const now = new Date();
-        const subExpires = linkedUser.subscription_expires
-          ? new Date(linkedUser.subscription_expires)
-          : null;
-        const subscriptionActive =
-          linkedUser.subscription_active && subExpires && subExpires > now;
+        const subExpires = linkedUser.subscription_expires ? new Date(linkedUser.subscription_expires) : null;
+        const subscriptionActive = linkedUser.subscription_active && subExpires && subExpires > now;
 
         return res.status(200).json({
-          ok:    true,
+          ok:     true,
           action: action_type,
           token:  sessionToken,
           user: {
@@ -421,12 +340,10 @@ module.exports = async function handler(req, res) {
 
         const hash = await bcrypt.hash(password, 10);
         await sql`
-          UPDATE users
-          SET password_hash = ${hash}
+          UPDATE users SET password_hash = ${hash}
           WHERE LOWER(username) = LOWER(${data.siteUsername})
         `;
 
-        // Инвалидируем ВСЕ существующие сессии пользователя — принудительный logout
         const userRows = await sql`
           SELECT id FROM users WHERE LOWER(username) = LOWER(${data.siteUsername}) LIMIT 1
         `;
@@ -435,14 +352,11 @@ module.exports = async function handler(req, res) {
         }
 
         console.log('confirm reset_password — пароль сброшен для:', data.siteUsername);
-
-        // Удаляем использованный токен
         await sql`DELETE FROM pending_actions WHERE token = ${token}`;
 
         return res.status(200).json({ ok: true, action: action_type });
       }
 
-      // Неизвестный тип действия в токене — удаляем и возвращаем ошибку
       await sql`DELETE FROM pending_actions WHERE token = ${token}`;
       return res.status(400).json({ error: `Неизвестный тип действия: ${action_type}` });
     }

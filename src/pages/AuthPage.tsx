@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAuth, useToast, sendRegistrationNotification } from '../context';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Eye, EyeOff, LogIn, UserPlus, CheckCircle } from 'lucide-react';
+import { Eye, EyeOff, LogIn, UserPlus, CheckCircle, MessageCircle } from 'lucide-react';
 
 const BOT_USERNAME = 'kbpostbot';
 
@@ -14,6 +14,7 @@ const TelegramIcon = ({ size = 18 }: { size?: number }) => (
 
 export default function AuthPage() {
   const location = useLocation();
+  const navigate = useNavigate();
   const initialMode = new URLSearchParams(location.search).get('mode') === 'register' ? 'register' : 'login';
 
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
@@ -34,6 +35,9 @@ export default function AuthPage() {
   const [showRegPass, setShowRegPass] = useState(false);
   const [regLoading, setRegLoading] = useState(false);
 
+  // После клика «Привязать Telegram» скрываем форму и показываем экран ожидания
+  const [botRedirected, setBotRedirected] = useState(false);
+
   // Читаем результат привязки из sessionStorage (записывается TelegramCallbackPage)
   const applyLinkResult = useCallback(() => {
     const raw = sessionStorage.getItem('kbpost_tg_link_result');
@@ -48,6 +52,7 @@ export default function AuthPage() {
       setRegTelegramLinked(true);
       if (data.siteUsername && !regUsername) setRegUsername(data.siteUsername);
       setMode('register');
+      setBotRedirected(false);
       sessionStorage.removeItem('kbpost_tg_link_result');
       addToast(`Telegram ${data.tgUsername} привязан! ✅`, 'success');
       return true;
@@ -60,6 +65,16 @@ export default function AuthPage() {
   useEffect(() => {
     applyLinkResult();
   }, []);
+
+  // Опрос sessionStorage пока пользователь на экране ожидания
+  useEffect(() => {
+    if (!botRedirected) return;
+    const interval = setInterval(() => {
+      const found = applyLinkResult();
+      if (found) clearInterval(interval);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [botRedirected, applyLinkResult]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -96,17 +111,20 @@ export default function AuthPage() {
       addToast('Сначала введите никнейм', 'error');
       return;
     }
-    // Генерируем токен для привязки. Бот НЕ проверяет наличие аккаунта на сайте —
-    // только сохраняет tgUsername и отправляет обратно в мини-апп.
+    // Генерируем лёгкий токен-идентификатор для prelink.
+    // НЕ записывается в БД — передаётся через URL и проверяется на фронте.
     const token = Math.random().toString(36).substring(2, 10);
     sessionStorage.setItem(`kbpost_link_token_${username.toLowerCase()}`, token);
-    // Параметр prelink_ сигнализирует боту что пользователь ещё не зарегистрирован
+
+    // Открываем бота в новой вкладке
     window.open(
       `https://t.me/${BOT_USERNAME}?start=prelink_${encodeURIComponent(username)}_${token}`,
       '_blank',
       'noopener,noreferrer'
     );
-    addToast('Перейдите в бота и нажмите «Подтвердить»', 'info');
+
+    // Скрываем форму, показываем экран ожидания
+    setBotRedirected(true);
   };
 
   const handleRegister = async (e: React.FormEvent) => {
@@ -117,11 +135,11 @@ export default function AuthPage() {
     }
     setRegLoading(true);
     const result = await register({
-      username: regUsername,
+      username:        regUsername,
       telegramUsername: regTelegram.startsWith('@') ? regTelegram : `@${regTelegram}`,
-      password: regPassword,
-      citizenship: regCitizenship,
-      account: regAccount,
+      password:        regPassword,
+      citizenship:     regCitizenship,
+      account:         regAccount,
     });
     setRegLoading(false);
     if (result.success) {
@@ -131,6 +149,56 @@ export default function AuthPage() {
       addToast(result.error || 'Ошибка регистрации', 'error');
     }
   };
+
+  // ─── Экран ожидания после открытия бота ──────────────────────────────────
+  if (botRedirected) {
+    return (
+      <div className="min-h-screen min-h-[100dvh] flex flex-col items-center justify-center px-4 relative">
+        <div className="bg-animated" />
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="glass-card-static p-8 max-w-sm w-full text-center space-y-6"
+        >
+          <div className="w-16 h-16 rounded-2xl bg-[#229ED9]/20 flex items-center justify-center mx-auto">
+            <MessageCircle size={32} className="text-[#229ED9]" />
+          </div>
+          <div className="space-y-2">
+            <p className="text-white font-semibold text-lg">
+              Окно регистрации открыто в боте
+            </p>
+            <p className="text-dark-400 text-sm leading-relaxed">
+              Перейдите в Telegram-бота{' '}
+              <span className="text-white font-medium">@{BOT_USERNAME}</span>,
+              нажмите «Подтвердить и продолжить», затем вернитесь на эту страницу.
+            </p>
+            <p className="text-dark-500 text-xs">
+              Страница обновится автоматически после подтверждения.
+            </p>
+          </div>
+          <div className="space-y-3">
+            <button
+              onClick={() => {
+                const found = applyLinkResult();
+                if (!found) addToast('Привязка ещё не подтверждена. Перейдите в бота.', 'info');
+              }}
+              className="btn-primary w-full"
+            >
+              <CheckCircle size={18} />
+              Я уже привязал аккаунт
+            </button>
+            <button
+              onClick={() => navigate('/', { replace: true })}
+              className="w-full py-2.5 rounded-xl text-sm font-semibold text-dark-400 hover:text-white transition-colors"
+            >
+              Эту вкладку можно закрыть
+            </button>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen min-h-[100dvh] flex flex-col items-center justify-center px-4 relative">
@@ -324,7 +392,6 @@ export default function AuthPage() {
                 </div>
               </div>
 
-              {/* Гражданство */}
               <div>
                 <label className="block text-sm font-medium text-dark-300 mb-2">Гражданство</label>
                 <div className="flex gap-2">

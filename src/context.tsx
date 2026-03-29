@@ -9,16 +9,17 @@ import {
 
 // ===== TELEGRAM helpers (клиентские) =====
 
-const BOT_TOKEN = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BOT_TOKEN) || '8656385676:AAGHHDZYqgmZVoaSzZaMadFeTjjoU3ieLb4';
+const BOT_TOKEN = (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_BOT_TOKEN) || '';
 const WEBAPP_URL = 'https://kbpost.vercel.app';
 
+// Отправляем обычную url-кнопку вместо web_app — Mini App упразднён
 async function sendTelegramMessage(chatId: string | number, text: string, withButton = true) {
   if (!BOT_TOKEN || !chatId) return;
   try {
     const body: any = { chat_id: chatId, text, parse_mode: 'HTML' };
     if (withButton) {
       body.reply_markup = {
-        inline_keyboard: [[{ text: '📦 Открыть kbpost', web_app: { url: WEBAPP_URL } }]],
+        inline_keyboard: [[{ text: '📦 Открыть kbpost', url: WEBAPP_URL }]],
       };
     }
     await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -58,26 +59,9 @@ export interface User {
   subscriptionExpires: string | null;
 }
 
-function dtoToUser(dto: UserDTO): User {
-  return {
-    id:                  dto.id,
-    username:            dto.username,
-    telegramUsername:    dto.telegramId ? `@${dto.telegramId}` : '',
-    telegramId:          dto.telegramId ?? null,
-    password:            '',
-    citizenship:         dto.citizenship,
-    account:             dto.account,
-    isAdmin:             dto.isAdmin,
-    balance:             dto.balance,
-    createdAt:           dto.createdAt || new Date().toISOString(),
-    subscriptionActive:  dto.subscriptionActive ?? false,
-    subscriptionExpires: dto.subscriptionExpires ?? null,
-  };
-}
-
 // ===== AUTH CONTEXT =====
 
-interface AuthContextType {
+interface AuthContextValue {
   user: User | null;
   loading: boolean;
   login: (username: string, password: string) => Promise<boolean>;
@@ -88,166 +72,160 @@ interface AuthContextType {
     citizenship: string;
     account: string;
   }) => Promise<{ success: boolean; error?: string }>;
-  logout: () => Promise<void>;
+  logout: () => void;
   refreshUser: () => Promise<void>;
 }
 
-const AuthContext = createContext<AuthContextType | null>(null);
+const AuthContext = createContext<AuthContextValue>({
+  user: null,
+  loading: true,
+  login: async () => false,
+  register: async () => ({ success: false }),
+  logout: () => {},
+  refreshUser: async () => {},
+});
 
 export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AppProvider');
-  return ctx;
+  return useContext(AuthContext);
 }
 
 // ===== TOAST CONTEXT =====
 
-interface ToastItem {
+type ToastType = 'success' | 'error' | 'info';
+
+interface Toast {
   id: string;
   message: string;
-  type: 'success' | 'error' | 'info';
+  type: ToastType;
 }
 
-interface ToastContextType {
-  addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+interface ToastContextValue {
+  addToast: (message: string, type?: ToastType) => void;
 }
 
-const ToastContext = createContext<ToastContextType | null>(null);
+const ToastContext = createContext<ToastContextValue>({ addToast: () => {} });
 
 export function useToast() {
-  const ctx = useContext(ToastContext);
-  if (!ctx) throw new Error('useToast must be used within AppProvider');
-  return ctx;
+  return useContext(ToastContext);
 }
 
-// ===== APP PROVIDER =====
+// ===== PROVIDER =====
+
+function userDtoToModel(dto: UserDTO): User {
+  return {
+    id:                  dto.id,
+    username:            dto.username,
+    telegramUsername:    dto.telegramId ? `@${dto.telegramId}` : '',
+    telegramId:          dto.telegramId,
+    password:            '',
+    citizenship:         dto.citizenship,
+    account:             dto.account,
+    isAdmin:             dto.isAdmin,
+    balance:             dto.balance ?? 0,
+    createdAt:           dto.createdAt || new Date().toISOString(),
+    subscriptionActive:  dto.subscriptionActive ?? false,
+    subscriptionExpires: dto.subscriptionExpires ?? null,
+  };
+}
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [user, setUser]       = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [toasts, setToasts]   = useState<Toast[]>([]);
 
-  useEffect(() => {
-    const token = getToken();
-    if (!token) { setLoading(false); return; }
-    apiGetProfile()
-      .then(dto => setUser(dtoToUser(dto)))
-      .catch(() => setToken(null))
-      .finally(() => setLoading(false));
+  const addToast = useCallback((message: string, type: ToastType = 'info') => {
+    const id = crypto.randomUUID();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
 
-  const login = async (username: string, password: string): Promise<boolean> => {
+  const refreshUser = useCallback(async () => {
+    try {
+      const dto = await apiGetProfile();
+      setUser(userDtoToModel(dto));
+    } catch {
+      setUser(null);
+    }
+  }, []);
+
+  // Восстановление сессии при загрузке
+  useEffect(() => {
+    const savedToken = getToken();
+    if (savedToken) {
+      apiGetProfile()
+        .then(dto => setUser(userDtoToModel(dto)))
+        .catch(() => { setUser(null); setToken(null); })
+        .finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
+  }, []);
+
+  const login = useCallback(async (username: string, password: string): Promise<boolean> => {
     try {
       const { token, user: dto } = await apiLogin(username, password);
       setToken(token);
-      setUser(dtoToUser(dto));
+      setUser(userDtoToModel(dto));
       return true;
     } catch {
       return false;
     }
-  };
+  }, []);
 
-  const register = async (data: {
+  const register = useCallback(async (data: {
     username: string;
     telegramUsername: string;
     password: string;
     citizenship: string;
     account: string;
   }): Promise<{ success: boolean; error?: string }> => {
-    if (!data.username.trim())         return { success: false, error: 'Введите никнейм' };
-    if (!data.telegramUsername.trim()) return { success: false, error: 'Привяжите Telegram' };
-    if (!data.password.trim() || data.password.length < 4)
-      return { success: false, error: 'Пароль должен быть от 4 символов' };
-    if (!data.citizenship.trim()) return { success: false, error: 'Выберите гражданство' };
-    if (!data.account.trim())     return { success: false, error: 'Укажите счёт' };
-
     try {
-      const { token, user: dto } = await apiRegister({
-        username:        data.username.trim(),
-        password:        data.password,
-        telegramUsername: data.telegramUsername.replace(/^@/, ''),
-        citizenship:     data.citizenship.trim(),
-        account:         data.account.trim(),
-      });
+      const { token, user: dto } = await apiRegister(data);
       setToken(token);
-      setUser(dtoToUser(dto));
+      setUser(userDtoToModel(dto));
       return { success: true };
     } catch (err: any) {
-      return { success: false, error: err.message || 'Ошибка регистрации' };
+      return { success: false, error: err.message };
     }
-  };
+  }, []);
 
-  const logout = async () => {
-    await apiLogout();
+  const logout = useCallback(() => {
+    apiLogout().catch(() => {});
     setUser(null);
-  };
-
-  const refreshUser = async () => {
-    try {
-      const dto = await apiGetProfile();
-      setUser(dtoToUser(dto));
-    } catch {}
-  };
-
-  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
-    const id = Math.random().toString(36).substring(2);
-    setToasts(prev => [...prev, { id, message, type }]);
-    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   }, []);
-
-  const removeToast = useCallback((id: string) => {
-    setToasts(prev => prev.filter(t => t.id !== id));
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-dark-950">
-        <div className="bg-animated" />
-        <motion.div
-          initial={{ opacity: 0, scale: 0.8 }}
-          animate={{ opacity: 1, scale: 1 }}
-          className="flex flex-col items-center gap-4"
-        >
-          <span className="text-2xl font-bold font-logo tracking-wider">
-            <span className="text-red-500">kb</span>post
-          </span>
-        </motion.div>
-      </div>
-    );
-  }
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout, refreshUser }}>
-      <ToastContext.Provider value={{ addToast }}>
+    <ToastContext.Provider value={{ addToast }}>
+      <AuthContext.Provider value={{ user, loading, login, register, logout, refreshUser }}>
         {children}
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-sm z-[100] flex flex-col gap-2 pointer-events-none items-center">
+
+        {/* Toast уведомления */}
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[9999] flex flex-col gap-2 w-full max-w-sm px-4 pointer-events-none">
           <AnimatePresence>
             {toasts.map(toast => (
               <motion.div
                 key={toast.id}
                 initial={{ opacity: 0, y: -20, scale: 0.95 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -20, scale: 0.95 }}
+                exit={{ opacity: 0, y: -10, scale: 0.95 }}
                 transition={{ duration: 0.2 }}
-                className={`pointer-events-auto w-full px-4 py-3 rounded-xl text-sm font-medium toast-glass flex items-center gap-3 cursor-pointer ${
-                  toast.type === 'success'
-                    ? 'border border-green-500/30 text-green-400'
-                    : toast.type === 'error'
-                    ? 'border border-red-500/30 text-red-400'
-                    : 'border border-blue-500/30 text-blue-400'
-                }`}
-                onClick={() => removeToast(toast.id)}
+                className="toast-glass flex items-center gap-3 px-4 py-3 rounded-2xl pointer-events-auto shadow-xl"
               >
-                {toast.type === 'success' && <CheckCircle size={18} />}
-                {toast.type === 'error' && <XCircle size={18} />}
-                {toast.type === 'info' && <Info size={18} />}
-                <span className="flex-1 text-center">{toast.message}</span>
-                <X size={14} className="opacity-50 hover:opacity-100 transition-opacity" />
+                {toast.type === 'success' && <CheckCircle size={18} className="text-green-400 flex-shrink-0" />}
+                {toast.type === 'error'   && <XCircle     size={18} className="text-red-400 flex-shrink-0" />}
+                {toast.type === 'info'    && <Info        size={18} className="text-blue-400 flex-shrink-0" />}
+                <p className="text-sm text-white font-medium flex-1">{toast.message}</p>
+                <button
+                  onClick={() => setToasts(prev => prev.filter(t => t.id !== toast.id))}
+                  className="text-dark-400 hover:text-white transition-colors flex-shrink-0 pointer-events-auto"
+                >
+                  <X size={14} />
+                </button>
               </motion.div>
             ))}
           </AnimatePresence>
         </div>
-      </ToastContext.Provider>
-    </AuthContext.Provider>
+      </AuthContext.Provider>
+    </ToastContext.Provider>
   );
 }

@@ -2,72 +2,79 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { CheckCircle, XCircle, Loader } from 'lucide-react';
-import { apiCheckToken, apiConfirmToken } from '../api';
+import { apiCheckToken, apiConfirmToken, setToken } from '../api';
+import { useAuth } from '../context';
 
 /**
- * Обрабатывает callback-ссылки от Telegram бота (открывается как mini-app):
+ * Обрабатывает callback-ссылки от Telegram бота (обычный браузер):
  *
- * Новая архитектура (токены в pending_actions — UUID формат):
- *   /#/tg-callback?token=UUID&action=link  — привязка TG существующего аккаунта
- *   /#/tg-callback?token=UUID&action=reset — сброс пароля (нужен ввод пароля)
+ * Новый формат (token — UUID, в pending_actions):
+ *   /#/tg-callback?token=UUID&action=link  — привязка TG к существующему аккаунту
+ *   /#/tg-callback?token=UUID&action=reset — сброс пароля
  *
- * Совместимость с prelink-форматом (регистрация, токен НЕ в pending_actions):
+ * Prelink-формат (регистрация нового пользователя, token НЕ в pending_actions):
  *   /#/tg-callback?action=link&user=USERNAME&tg=@TG&token=TOKEN&cid=CHATID
- *
- * Определение формата: UUID содержит ровно 5 групп hex через дефисы (36 символов).
- * Короткий токен (8 символов от Math.random) — всегда legacy prelink.
  */
 
-// Проверяет, является ли строка UUID v4
 function isUUID(str: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 }
 
 export default function TelegramCallbackPage() {
-  const navigate = useNavigate();
-  const location = useLocation();
-  const [status, setStatus] = useState<'loading' | 'success' | 'error' | 'need_password'>('loading');
-  const [message, setMessage] = useState('');
+  const navigate   = useNavigate();
+  const location   = useLocation();
+  const { refreshUser } = useAuth();
+
+  const [status, setStatus]           = useState<'loading' | 'success' | 'error' | 'need_password'>('loading');
+  const [message, setMessage]         = useState('');
   const [pendingToken, setPendingToken] = useState<string | null>(null);
   const [newPassword, setNewPassword] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+  const [submitting, setSubmitting]   = useState(false);
 
   useEffect(() => {
     processCallback();
   }, []);
 
   async function processCallback() {
-    const params = new URLSearchParams(location.search);
-    const action     = params.get('action');
-    const token      = params.get('token');
-    const tgUsername = params.get('tg');
+    const params       = new URLSearchParams(location.search);
+    const action       = params.get('action');
+    const token        = params.get('token');
+    const tgUsername   = params.get('tg');
     const siteUsername = params.get('user');
-    const chatId     = params.get('cid');
+    const chatId       = params.get('cid');
 
     // ===== НОВЫЙ ФОРМАТ: ?token=UUID&action=link|reset =====
-    // Используется только если token — настоящий UUID (создан ботом через createPendingToken)
     if (token && isUUID(token) && (action === 'link' || action === 'reset')) {
       try {
-        const { actionType, data } = await apiCheckToken(token);
+        const { actionType } = await apiCheckToken(token);
 
         if (actionType === 'link_tg') {
-          // Привязка к существующему аккаунту — подтверждаем сразу
-          await apiConfirmToken(token);
-          const linkedTg = data.tgUsername || '';
-          const linkedUser = data.siteUsername || '';
+          // Подтверждаем привязку. Сервер создаёт сессию и возвращает Set-Cookie + { token, user }.
+          const result = await apiConfirmToken(token) as any;
 
-          // Сохраняем результат для AuthPage
-          const linkData = { tgUsername: linkedTg, token, siteUsername: linkedUser, ts: Date.now() };
-          sessionStorage.setItem('kbpost_tg_link_result', JSON.stringify(linkData));
-
-          setStatus('success');
-          setMessage(`Telegram ${linkedTg} привязан! Возвращаемся к регистрации...`);
-          setTimeout(() => navigate('/auth?mode=register', { replace: true }), 1500);
+          if (result.token && result.user) {
+            // Сохраняем токен в sessionStorage для apiFetch
+            setToken(result.token);
+            // Обновляем контекст пользователя
+            await refreshUser().catch(() => {});
+            setStatus('success');
+            setMessage('Telegram привязан! Вы авторизованы. Переходим...');
+            setTimeout(() => navigate('/', { replace: true }), 1500);
+          } else {
+            // Fallback: сессия не вернулась — сохраняем в sessionStorage для AuthPage
+            const linkedTg   = result?.user?.telegramId ? `@${result.user.telegramId}` : (tgUsername || '');
+            const linkedUser = result?.user?.username   || siteUsername || '';
+            sessionStorage.setItem('kbpost_tg_link_result', JSON.stringify({
+              tgUsername: linkedTg, token, siteUsername: linkedUser, ts: Date.now(),
+            }));
+            setStatus('success');
+            setMessage('Telegram привязан! Возвращаемся...');
+            setTimeout(() => navigate('/auth?mode=register', { replace: true }), 1500);
+          }
           return;
         }
 
         if (actionType === 'reset_password') {
-          // Сброс пароля — нужно ввести новый пароль
           setPendingToken(token);
           setStatus('need_password');
           return;
@@ -83,9 +90,8 @@ export default function TelegramCallbackPage() {
     }
 
     // ===== PRELINK / LEGACY ФОРМАТ =====
-    // Токен НЕ является UUID — это legacy токен от Math.random() при prelink,
-    // он никогда не записывается в pending_actions и не должен туда запрашиваться.
-    // Также обрабатываем случай когда token=UUID но есть явные legacy-параметры tg= и user=
+    // token — короткий (8 символов от Math.random), НЕ UUID, НЕ в pending_actions.
+    // Используется при регистрации через бота (prelink_).
 
     if (action === 'link') {
       if (!tgUsername || !siteUsername) {
@@ -94,19 +100,19 @@ export default function TelegramCallbackPage() {
         return;
       }
 
-      // Сохраняем результат для AuthPage — регистрация продолжится там
-      const linkData = {
+      // Сохраняем в sessionStorage — AuthPage прочитает и заполнит форму
+      sessionStorage.setItem('kbpost_tg_link_result', JSON.stringify({
         tgUsername,
         token: token || '',
         siteUsername,
         ts: Date.now(),
-      };
-      sessionStorage.setItem('kbpost_tg_link_result', JSON.stringify(linkData));
+      }));
 
-      // Сохраняем chatId для TG уведомлений
       if (chatId) {
-        const tgKey = `kbpost_tg_chatid_${tgUsername.toLowerCase().replace('@', '')}`;
-        localStorage.setItem(tgKey, chatId);
+        localStorage.setItem(
+          `kbpost_tg_chatid_${tgUsername.toLowerCase().replace('@', '')}`,
+          chatId
+        );
       }
 
       setStatus('success');
@@ -115,7 +121,7 @@ export default function TelegramCallbackPage() {
       return;
     }
 
-    // Устаревший reset: ?action=reset&user=X&pwd=Y (без токена в БД)
+    // Устаревший reset без pending_actions
     if (action === 'reset') {
       const newPwd = params.get('pwd');
       if (!newPwd || newPwd.length < 4) {
