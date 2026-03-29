@@ -60,8 +60,7 @@ body {
 
 .glass-blur {
   background: #0a0a0a80;
-  backdrop-filter: blur(3px) saturate(1.5);
-  -webkit-backdrop-filter: blur(3px) saturate(1.5);
+  backdrop-filter: blur(6px) saturate(1.5);
 }
 
 .toast-glass {

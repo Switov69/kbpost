@@ -18,14 +18,14 @@ function getBranchInfo(id: string | null, branches: BranchDTO[]): string {
 }
 
 export default function ParcelDetailPage() {
-  const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
-  const { user } = useAuth();
+  const { id }    = useParams<{ id: string }>();
+  const navigate  = useNavigate();
+  const { user }  = useAuth();
   const { addToast } = useToast();
-  const [parcel, setParcel] = useState<ParcelDTO | null>(null);
-  const [branches, setBranches] = useState<BranchDTO[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState(false);
+  const [parcel, setParcel]       = useState<ParcelDTO | null>(null);
+  const [branches, setBranches]   = useState<BranchDTO[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [copied, setCopied]       = useState(false);
   const [showPayPopup, setShowPayPopup] = useState(false);
 
   const fetchData = useCallback(async () => {
@@ -64,13 +64,16 @@ export default function ParcelDetailPage() {
     );
   }
 
-  const isSender   = user.id === parcel.senderId;
-  const isReceiver = user.id === parcel.receiverId;
+  const isSender      = user.id === parcel.senderId;
+  const isReceiver    = user.id === parcel.receiverId;
   const otherUsername = isSender ? parcel.receiverUsername : parcel.senderUsername;
 
   const showSentBtn     = isSender   && parcel.status === 1;
   const showReceivedBtn = isReceiver && parcel.status === 6;
   const showPayBtn      = isReceiver && parcel.cashOnDelivery && !parcel.cashOnDeliveryPaid && !parcel.cashOnDeliveryConfirmed;
+
+  // Защита от null/undefined statusHistory — критически важно, иначе .reverse() падает
+  const statusHistory = Array.isArray(parcel.statusHistory) ? parcel.statusHistory : [];
 
   const handleCopyTTN = () => {
     navigator.clipboard.writeText(parcel.ttn).then(() => {
@@ -246,8 +249,8 @@ export default function ParcelDetailPage() {
         </div>
       </motion.div>
 
-      {/* Status history */}
-      {parcel.statusHistory.length > 0 && (
+      {/* Status history — защита от пустого/null statusHistory */}
+      {statusHistory.length > 0 && (
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -256,7 +259,7 @@ export default function ParcelDetailPage() {
         >
           <h3 className="text-sm font-bold text-dark-300 uppercase tracking-wider">История статусов</h3>
           <div className="space-y-2">
-            {[...parcel.statusHistory].reverse().map((entry, i) => (
+            {[...statusHistory].reverse().map((entry, i) => (
               <div key={i} className="flex items-center gap-3">
                 <div
                   className="w-2 h-2 rounded-full flex-shrink-0"
@@ -371,6 +374,11 @@ export default function ParcelDetailPage() {
                     <li>Откройте банк-бота <a href="https://t.me/anorloxbot" target="_blank" rel="noopener noreferrer" className="text-red-400 font-medium underline">«анорлохбот»</a></li>
                     <li>Отправьте боту команду <span className="text-red-400 font-mono font-medium">/transfer</span></li>
                     <li>Переведите <span className="text-orange-400 font-semibold">{parcel.cashOnDeliveryAmount} кбк</span> на счёт <span className="text-red-400 font-semibold">kbpost</span></li>
+                    <li>
+                      В комментарии к переводу обязательно укажите:{' '}
+                      <span className="text-yellow-400 font-mono font-semibold">наложка {parcel.ttn}</span>
+                      {' '}— иначе оплату могут не принять
+                    </li>
                     <li>После перевода нажмите кнопку <span className="text-green-400 font-medium">«Я оплатил»</span> ниже</li>
                   </ol>
                 </div>

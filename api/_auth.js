@@ -6,6 +6,7 @@ const { getDB } = require('./_db');
  * Извлекает session-токен из cookie или заголовка Authorization.
  * Возвращает объект сессии или null если токен невалиден / истёк.
  * Все ID хранятся как TEXT — никаких ::uuid приведений.
+ * GET /api/user НЕ обновляет expires_at — это делается только при логине.
  */
 async function getSessionUser(req) {
   // 1) Пробуем из Authorization: Bearer <token>
@@ -25,7 +26,8 @@ async function getSessionUser(req) {
 
   try {
     const sql = getDB();
-    // Токен хранится как TEXT — прямое сравнение строк, без ::uuid
+    // Токен — TEXT, прямое сравнение строк, без ::uuid
+    // Read-only: НЕ обновляем expires_at, чтобы избежать конфликтов при частых F5
     const rows = await sql`
       SELECT s.user_id, u.username, u.is_admin, u.telegram_id,
              u.citizenship, u.account, u.balance,
@@ -65,7 +67,7 @@ function parseCookies(cookieHeader) {
 }
 
 /**
- * CORS заголовки — разрешаем запросы с фронта.
+ * CORS заголовки — конкретный origin (не *) + Allow-Credentials: true.
  */
 function corsHeaders(origin) {
   const allowed = [
@@ -82,4 +84,26 @@ function corsHeaders(origin) {
   };
 }
 
-module.exports = { getSessionUser, corsHeaders, parseCookies };
+/**
+ * Устанавливает cookie сессии для обычного браузера.
+ * SameSite=Lax — работает при переходе по ссылкам из бота,
+ * не блокируется современными браузерами в отличие от None.
+ */
+function setSessionCookie(res, token) {
+  res.setHeader(
+    'Set-Cookie',
+    `kbpost_session=${token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000`
+  );
+}
+
+/**
+ * Стирает cookie сессии.
+ */
+function clearSessionCookie(res) {
+  res.setHeader(
+    'Set-Cookie',
+    'kbpost_session=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0'
+  );
+}
+
+module.exports = { getSessionUser, corsHeaders, parseCookies, setSessionCookie, clearSessionCookie };

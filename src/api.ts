@@ -29,6 +29,17 @@ export function getToken(): string | null {
   return _token;
 }
 
+/**
+ * Центральная функция для всех API-запросов.
+ *
+ * При получении 401 или 403 диспатчит кастомное событие 'auth:unauthorized',
+ * которое перехватывает AppProvider и разлогинивает пользователя без
+ * циклических повторных запросов.
+ *
+ * Исключение: запросы к /auth (login, register, confirm) — там 401/403
+ * являются ожидаемыми ответами (неверный пароль и т.п.) и не должны
+ * триггерить глобальный logout.
+ */
 async function apiFetch<T>(
   path: string,
   options: RequestInit = {}
@@ -47,6 +58,12 @@ async function apiFetch<T>(
   });
 
   if (!res.ok) {
+    // 401 / 403 на защищённых роутах (не /auth) → глобальный выход
+    const isAuthEndpoint = path.startsWith('/auth');
+    if ((res.status === 401 || res.status === 403) && !isAuthEndpoint) {
+      window.dispatchEvent(new CustomEvent('auth:unauthorized', { detail: { status: res.status } }));
+    }
+
     let errMsg = `HTTP ${res.status}`;
     try {
       const body = await res.json();
@@ -74,8 +91,6 @@ export interface UserDTO {
   subscriptionExpires: string | null;
 }
 
-// Было: POST /api/auth/login
-// Стало: POST /api/auth  { action: 'login', username, password }
 export async function apiLogin(
   username: string,
   password: string
@@ -86,8 +101,6 @@ export async function apiLogin(
   });
 }
 
-// Было: POST /api/auth/logout
-// Стало: POST /api/auth  { action: 'logout' }
 export async function apiLogout(): Promise<void> {
   try {
     await apiFetch('/auth', {
@@ -98,8 +111,6 @@ export async function apiLogout(): Promise<void> {
   setToken(null);
 }
 
-// Было: POST /api/auth/register
-// Стало: POST /api/auth  { action: 'register', ...data }
 export async function apiRegister(data: {
   username: string;
   password: string;
@@ -115,8 +126,6 @@ export async function apiRegister(data: {
 
 // ===== TOKENS (pending_actions) =====
 
-// Было: POST /api/auth/check-token  { token }
-// Стало: POST /api/auth  { action: 'checkToken', token }
 export async function apiCheckToken(
   token: string
 ): Promise<{ actionType: string; data: Record<string, string> }> {
@@ -126,12 +135,10 @@ export async function apiCheckToken(
   });
 }
 
-// Было: POST /api/auth/confirm  { token, password? }
-// Стало: POST /api/auth  { action: 'confirm', token, password? }
 export async function apiConfirmToken(
   token: string,
   password?: string
-): Promise<{ ok: boolean; action: string; tgUsername?: string }> {
+): Promise<{ ok: boolean; action: string; token?: string; user?: UserDTO }> {
   return apiFetch('/auth', {
     method: 'POST',
     body: JSON.stringify({ action: 'confirm', token, password }),
@@ -140,20 +147,14 @@ export async function apiConfirmToken(
 
 // ===== USER =====
 
-// Было: GET /api/user/profile
-// Стало: GET /api/user
 export async function apiGetProfile(): Promise<UserDTO> {
   return apiFetch('/user');
 }
 
-// Было: GET /api/user/all
-// Стало: GET /api/user?type=all
 export async function apiGetAllUsers(): Promise<UserDTO[]> {
   return apiFetch('/user?type=all');
 }
 
-// Было: POST /api/user/manage  { action, userId, ...extra }
-// Стало: POST /api/user  { action, userId, ...extra }
 export async function apiManageUser(
   action: string,
   userId: string,
@@ -165,8 +166,6 @@ export async function apiManageUser(
   });
 }
 
-// Было: POST /api/user/change-password  { oldPassword, newPassword }
-// Стало: POST /api/user  { action: 'changePassword', oldPassword, newPassword }
 export async function apiChangePassword(
   oldPassword: string,
   newPassword: string
@@ -177,8 +176,6 @@ export async function apiChangePassword(
   });
 }
 
-// Было: POST /api/user/update-account  { account }
-// Стало: POST /api/user  { action: 'updateAccount', account }
 export async function apiUpdateAccount(account: string): Promise<void> {
   await apiFetch('/user', {
     method: 'POST',
@@ -209,14 +206,10 @@ export interface ParcelDTO {
   updatedAt: string;
 }
 
-// Было: GET /api/parcels
-// Стало: GET /api/parcels  (без изменений)
 export async function apiGetParcels(): Promise<ParcelDTO[]> {
   return apiFetch('/parcels');
 }
 
-// Было: POST /api/parcels/create  { ...data }
-// Стало: POST /api/parcels  { action: 'create', ...data }
 export async function apiCreateParcel(data: {
   description: string;
   receiverUsername: string;
@@ -232,8 +225,6 @@ export async function apiCreateParcel(data: {
   });
 }
 
-// Было: POST /api/parcels/update  { parcelId, action, ...extra }
-// Стало: POST /api/parcels  { action: 'update', parcelId, ...extra }
 export async function apiUpdateParcel(
   parcelId: string,
   action: string,
@@ -245,8 +236,6 @@ export async function apiUpdateParcel(
   });
 }
 
-// Было: POST /api/parcels/delete  { parcelId }
-// Стало: DELETE /api/parcels  { parcelId }
 export async function apiDeleteParcel(parcelId: string): Promise<void> {
   await apiFetch('/parcels', {
     method: 'DELETE',
@@ -264,12 +253,10 @@ export interface BranchDTO {
   address: string;
 }
 
-// Без изменений — /api/branches не трогался
 export async function apiGetBranches(): Promise<BranchDTO[]> {
   return apiFetch('/branches');
 }
 
-// Без изменений — /api/branches/manage не трогался
 export async function apiManageBranch(
   action: 'create' | 'update' | 'delete',
   data: Partial<BranchDTO>
@@ -291,7 +278,6 @@ export interface SubscriptionRequestDTO {
   createdAt: string;
 }
 
-// Пользователь отправляет запрос на подтверждение оплаты подписки
 export async function apiRequestSubscription(): Promise<void> {
   await apiFetch('/user', {
     method: 'POST',
@@ -299,12 +285,10 @@ export async function apiRequestSubscription(): Promise<void> {
   });
 }
 
-// Получить список pending-запросов на подписку (admin)
 export async function apiGetSubscriptionRequests(): Promise<SubscriptionRequestDTO[]> {
   return apiFetch('/user?type=subscriptionRequests');
 }
 
-// Подтвердить подписку (admin)
 export async function apiConfirmSubscription(requestId: string): Promise<void> {
   await apiFetch('/user', {
     method: 'POST',
@@ -312,7 +296,6 @@ export async function apiConfirmSubscription(requestId: string): Promise<void> {
   });
 }
 
-// Отклонить подписку (admin)
 export async function apiRejectSubscription(requestId: string): Promise<void> {
   await apiFetch('/user', {
     method: 'POST',

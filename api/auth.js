@@ -6,18 +6,24 @@ const crypto = require('crypto');
 const { getDB } = require('./_db');
 const { corsHeaders, getSessionUser } = require('./_auth');
 
+// ─────────────────────────────────────────────
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ─────────────────────────────────────────────
+
+// Генерирует UUID v4 как TEXT — используется для токенов сессий и pending_actions
 function generateId() {
   return crypto.randomUUID();
 }
 
+// Генерирует короткий TEXT-ID для записей users (16 символов hex)
 function generateUserId() {
   return crypto.randomBytes(8).toString('hex');
 }
 
 /**
- * Cookie для обычного браузера (не iframe).
- * SameSite=Lax — кука передаётся при переходе по ссылке из бота (GET-навигация),
- * но не в cross-site POST/XHR. Безопаснее None, удобнее Strict.
+ * Устанавливает cookie сессии для обычного браузера.
+ * SameSite=Lax — кука передаётся при переходе по ссылкам (из Telegram),
+ * не блокируется в браузерах, не требует iframe-контекста.
  */
 function setSessionCookie(res, token) {
   res.setHeader(
@@ -26,12 +32,19 @@ function setSessionCookie(res, token) {
   );
 }
 
+/**
+ * Стирает cookie сессии (устанавливает Max-Age=0).
+ */
 function clearSessionCookie(res) {
   res.setHeader(
     'Set-Cookie',
     'kbpost_session=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0'
   );
 }
+
+// ─────────────────────────────────────────────
+// ОБРАБОТЧИК
+// ─────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
   const headers = corsHeaders(req.headers.origin);
@@ -70,7 +83,10 @@ module.exports = async function handler(req, res) {
       }
 
       const token = generateId();
-      await sql`INSERT INTO sessions (token, user_id) VALUES (${token}, ${user.id})`;
+      await sql`
+        INSERT INTO sessions (token, user_id)
+        VALUES (${token}, ${user.id})
+      `;
 
       setSessionCookie(res, token);
 
@@ -132,8 +148,13 @@ module.exports = async function handler(req, res) {
       await sql`
         INSERT INTO users (id, username, password_hash, telegram_id, citizenship, account, is_admin)
         VALUES (
-          ${newUserId}, ${username.trim()}, ${passwordHash},
-          ${tgNorm}, ${citizenship.trim()}, ${account.trim()}, FALSE
+          ${newUserId},
+          ${username.trim()},
+          ${passwordHash},
+          ${tgNorm},
+          ${citizenship.trim()},
+          ${account.trim()},
+          FALSE
         )
       `;
 
@@ -144,7 +165,10 @@ module.exports = async function handler(req, res) {
       const user = newUserRows[0];
 
       const token = generateId();
-      await sql`INSERT INTO sessions (token, user_id) VALUES (${token}, ${user.id})`;
+      await sql`
+        INSERT INTO sessions (token, user_id)
+        VALUES (${token}, ${user.id})
+      `;
 
       setSessionCookie(res, token);
 
@@ -176,7 +200,7 @@ module.exports = async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    // ===== 4. CREATE TOKEN (вызывается ботом) =====
+    // ===== 4. CREATE TOKEN (вызывается ботом через x-bot-secret) =====
     if (action === 'createToken') {
       const secret = req.headers['x-bot-secret'];
       if (!secret || secret !== process.env.BOT_SECRET) {
@@ -204,7 +228,8 @@ module.exports = async function handler(req, res) {
       const rows = await sql`
         SELECT token, action_type, data, expires_at
         FROM pending_actions
-        WHERE token = ${token} AND expires_at > NOW()
+        WHERE token = ${token}
+          AND expires_at > NOW()
         LIMIT 1
       `;
 
@@ -228,7 +253,7 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    // ===== 6. CONFIRM =====
+    // ===== 6. CONFIRM (применить токен) =====
     if (action === 'confirm' && req.method === 'POST') {
       const { token, password } = req.body;
       if (!token) return res.status(400).json({ error: 'token обязателен' });
@@ -238,7 +263,8 @@ module.exports = async function handler(req, res) {
       const rows = await sql`
         SELECT token, action_type, data, expires_at
         FROM pending_actions
-        WHERE token = ${token} AND expires_at > NOW()
+        WHERE token = ${token}
+          AND expires_at > NOW()
         LIMIT 1
       `;
 
@@ -281,7 +307,8 @@ module.exports = async function handler(req, res) {
         }
 
         await sql`
-          UPDATE users SET telegram_id = ${tgNorm}
+          UPDATE users
+          SET telegram_id = ${tgNorm}
           WHERE LOWER(username) = LOWER(${data.siteUsername})
         `;
         console.log('confirm link_tg — обновлён telegram_id:', tgNorm, 'для:', data.siteUsername);
@@ -289,7 +316,9 @@ module.exports = async function handler(req, res) {
         const userRows = await sql`
           SELECT id, username, is_admin, telegram_id, citizenship, account, balance, created_at,
                  subscription_active, subscription_expires
-          FROM users WHERE LOWER(username) = LOWER(${data.siteUsername}) LIMIT 1
+          FROM users
+          WHERE LOWER(username) = LOWER(${data.siteUsername})
+          LIMIT 1
         `;
 
         await sql`DELETE FROM pending_actions WHERE token = ${token}`;
@@ -301,9 +330,11 @@ module.exports = async function handler(req, res) {
 
         const linkedUser = userRows[0];
 
-        // Создаём сессию — пользователь авторизуется сразу в браузерной вкладке
         const sessionToken = generateId();
-        await sql`INSERT INTO sessions (token, user_id) VALUES (${sessionToken}, ${linkedUser.id})`;
+        await sql`
+          INSERT INTO sessions (token, user_id)
+          VALUES (${sessionToken}, ${linkedUser.id})
+        `;
 
         setSessionCookie(res, sessionToken);
         console.log('confirm link_tg — создана сессия для:', linkedUser.username);
@@ -340,7 +371,8 @@ module.exports = async function handler(req, res) {
 
         const hash = await bcrypt.hash(password, 10);
         await sql`
-          UPDATE users SET password_hash = ${hash}
+          UPDATE users
+          SET password_hash = ${hash}
           WHERE LOWER(username) = LOWER(${data.siteUsername})
         `;
 
