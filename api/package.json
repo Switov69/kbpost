@@ -1,9 +1,0 @@
-{
-  "name": "kbpost-api",
-  "version": "1.0.0",
-  "description": "KBPOST Vercel Serverless Functions",
-  "dependencies": {
-    "@neondatabase/serverless": "^0.10.4",
-    "bcryptjs": "^2.4.3"
-  }
-}
