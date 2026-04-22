@@ -1,7 +1,7 @@
 import { neon } from '@neondatabase/serverless';
 import type { UserProfile, Parcel, CreateParcelData, TelegramUser, Citizenship } from './types';
 
-const DATABASE_URL = import.meta.env.DATABASE_URL as string;
+const DATABASE_URL = import.meta.env.VITE_DATABASE_URL as string;
 
 function getDb() {
   if (!DATABASE_URL) throw new Error('DATABASE_URL not set');
